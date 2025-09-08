@@ -1,5 +1,6 @@
+# src/config/schema.py
 from __future__ import annotations
-from typing import List, Dict, Optional, Literal
+from typing import List, Dict, Optional, Literal, Any
 from pydantic import BaseModel, Field
 
 Reason = Literal[
@@ -18,10 +19,12 @@ class PICOS(BaseModel):
 
 class Criteria(BaseModel):
     picos: PICOS
-    inclusion_criteria: Dict[str, str]
-    exclusion_criteria: Dict[str, str]
-    reason_taxonomy: List[Reason]
-    boolean_queries: Dict[str, str]
+    # <-- be permissive; the LLM may return lists/ints/bools etc.
+    inclusion_criteria: Dict[str, Any] = Field(default_factory=dict)
+    exclusion_criteria: Dict[str, Any] = Field(default_factory=dict)
+    # be flexible here too
+    reason_taxonomy: List[str] = Field(default_factory=list)
+    boolean_queries: Dict[str, str] = Field(default_factory=dict)
 
 class Document(BaseModel):
     pmid: str
@@ -46,7 +49,7 @@ class DecisionLLM(BaseModel):
     decision: Literal["include","exclude","borderline"]
     primary_reason: Reason
     confidence: float
-    evidence: Dict[str, str]  # population_quote, intervention_quote, design_evidence, notes
+    evidence: Dict[str, str]
 
 class LedgerRow(BaseModel):
     pmid: str

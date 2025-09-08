@@ -18,6 +18,56 @@ from src.io.store import ensure_run_dir, write_json, write_tsv
 
 app = typer.Typer(add_completion=False)
 
+# src/cli/main.py  (add helpers near the top)
+LANG_MAP = {
+    "EN": "English", "ENG": "English", "ENGLISH": "English",
+    "PT": "Portuguese", "POR": "Portuguese", "PT-BR": "Portuguese", "PORTUGUESE": "Portuguese",
+    "ES": "Spanish", "SPA": "Spanish", "SPANISH": "Spanish",
+}
+
+def _coerce_str(v):
+    # turn lists/ints/floats into readable strings
+    if isinstance(v, list):
+        return "; ".join(str(x) for x in v)
+    if isinstance(v, (int, float, bool)):
+        return str(v)
+    return v if isinstance(v, str) else str(v)
+
+def _normalize_criteria_js(criteria_js: dict, languages_opt: str, year_min_opt: int) -> dict:
+    # Ensure structure exists
+    picos = criteria_js.get("picos") or {}
+    picos.setdefault("population", "")
+    picos.setdefault("intervention", "")
+    picos.setdefault("comparison", None)
+    picos.setdefault("outcomes", [])
+    picos.setdefault("study_design", [])
+    picos.setdefault("year_min", year_min_opt)
+
+    # languages: prefer LLM, fall back to CLI option, normalize codes -> names
+    llm_langs = picos.get("languages")
+    if not llm_langs or not isinstance(llm_langs, list):
+        llm_langs = [s.strip() for s in languages_opt.split(",")]
+    norm_langs = []
+    for s in llm_langs:
+        key = str(s).strip().upper()
+        norm_langs.append(LANG_MAP.get(key, s if s else "English"))
+    picos["languages"] = norm_langs
+    criteria_js["picos"] = picos
+
+    # Coerce inclusion/exclusion criteria values to strings for readability
+    for key in ("inclusion_criteria", "exclusion_criteria"):
+        blob = criteria_js.get(key) or {}
+        if isinstance(blob, dict):
+            criteria_js[key] = {k: _coerce_str(v) for k, v in blob.items()}
+        else:
+            criteria_js[key] = {}
+    # reason_taxonomy: ensure array of strings
+    rt = criteria_js.get("reason_taxonomy")
+    if not isinstance(rt, list):
+        criteria_js["reason_taxonomy"] = ["design_mismatch","population_mismatch","intervention_mismatch","language","year","insufficient_info","off_topic"]
+    return criteria_js
+
+
 def _to_docs(meta_map: Dict[str,dict]) -> List[Document]:
     docs = []
     for pmid, m in meta_map.items():
@@ -44,6 +94,7 @@ def run(prompt: str = typer.Argument(..., help="Topic intent / preferences parag
     else:
         criteria_js["picos"].setdefault("year_min", year_min)
         criteria_js["picos"].setdefault("languages", languages.split(","))
+    criteria_js = _normalize_criteria_js(criteria_js, languages, year_min)
     criteria = Criteria(**criteria_js)
 
     run_dir = ensure_run_dir(out_dir)
