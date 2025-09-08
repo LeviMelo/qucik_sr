@@ -2,9 +2,12 @@ from __future__ import annotations
 from typing import Dict, List, Tuple
 import numpy as np
 import networkx as nx
+import logging
 from src.config.schema import Document, Signals
-from src.text.embed import embed_texts
+from src.text.embed import embed_texts, embed_docs_with_cache
 from src.net.icite import icite_neighbors_map
+
+log = logging.getLogger("features")
 
 def _band_sem(x: float) -> str:
     if x >= 0.90: return "Very high"
@@ -20,9 +23,9 @@ def abstract_len_bin(txt: str) -> str:
     return "long"
 
 def build_embeddings(docs: List[Document]) -> Tuple[np.ndarray, Dict[str,int]]:
+    pmids = [d.pmid for d in docs]
     texts = [ (d.title or "") + "\n" + (d.abstract or "") for d in docs ]
-    mat = embed_texts(texts)
-    idx = {docs[i].pmid: i for i in range(len(docs))}
+    mat, idx = embed_docs_with_cache(pmids, texts)
     return mat, idx
 
 def cosine(a: np.ndarray, b: np.ndarray) -> float:

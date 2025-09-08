@@ -1,0 +1,33 @@
+{
+  "queries": [
+    [
+      "population",
+      "Adolescents OR Adults"
+    ],
+    [
+      "intervention",
+      "Intercostal nerve cryoablation"
+    ],
+    [
+      "comparison",
+      "NOT (Thoracic epidural OR Paravertebral OR Standard care)"
+    ],
+    [
+      "outcomes",
+      "LOS OR Opioid OR Pain OR Neuropathic pain"
+    ],
+    [
+      "study_design",
+      "RCT OR Clinical trials OR Cohort OR Case-control OR Observational"
+    ],
+    [
+      "language",
+      "English OR Portuguese OR Spanish"
+    ],
+    [
+      "year",
+      "2000:2024"
+    ]
+  ],
+  "hits": 8600
+}

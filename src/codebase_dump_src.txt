@@ -1,0 +1,1368 @@
+Project structure for '/c/Users/Galaxy/LEVI/projects/Python/qucik_sr/src':
+===============================================================================
+  __init__.py
+  __pycache__/__init__.cpython-312.pyc
+  cli/__init__.py
+  cli/__pycache__/__init__.cpython-312.pyc
+  cli/__pycache__/main.cpython-312.pyc
+  cli/main.py
+  config/__init__.py
+  config/__pycache__/__init__.cpython-312.pyc
+  config/__pycache__/defaults.cpython-312.pyc
+  config/__pycache__/schema.cpython-312.pyc
+  config/defaults.py
+  config/schema.py
+  graph/__init__.py
+  graph/__pycache__/__init__.cpython-312.pyc
+  graph/__pycache__/cile.cpython-312.pyc
+  graph/cile.py
+  io/__init__.py
+  io/__pycache__/__init__.cpython-312.pyc
+  io/__pycache__/docdb.cpython-312.pyc
+  io/__pycache__/store.cpython-312.pyc
+  io/__pycache__/vecdb.cpython-312.pyc
+  io/docdb.py
+  io/store.py
+  io/vecdb.py
+  net/__init__.py
+  net/__pycache__/__init__.cpython-312.pyc
+  net/__pycache__/entrez.cpython-312.pyc
+  net/__pycache__/icite.cpython-312.pyc
+  net/entrez.py
+  net/icite.py
+  prisma/__init__.py
+  prisma/counts.py
+  screen/__init__.py
+  screen/__pycache__/__init__.cpython-312.pyc
+  screen/__pycache__/features.cpython-312.pyc
+  screen/__pycache__/gates.cpython-312.pyc
+  screen/__pycache__/llm_decide.cpython-312.pyc
+  screen/__pycache__/regressor.cpython-312.pyc
+  screen/features.py
+  screen/gates.py
+  screen/llm_decide.py
+  screen/regressor.py
+  text/__init__.py
+  text/__pycache__/__init__.cpython-312.pyc
+  text/__pycache__/embed.cpython-312.pyc
+  text/__pycache__/llm.cpython-312.pyc
+  text/__pycache__/prompts.cpython-312.pyc
+  text/embed.py
+  text/llm.py
+  text/prompts.py
+
+
+
+###############################################################################
+### FILE: io/docdb.py
+###############################################################################
+from __future__ import annotations
+import sqlite3, pathlib, json
+from typing import Dict, List
+from src.config.defaults import DATA_DIR
+
+DB_PATH = pathlib.Path(DATA_DIR) / "cache" / "docs.sqlite3"
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+class DocDB:
+    def __init__(self, path: pathlib.Path = DB_PATH):
+        self.conn = sqlite3.connect(str(path))
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS docs(
+            pmid TEXT PRIMARY KEY,
+            json TEXT NOT NULL
+        )""")
+        self.conn.commit()
+
+    def get_many(self, pmids: List[str]) -> Dict[str, dict]:
+        if not pmids: return {}
+        q = ",".join("?"*len(pmids))
+        cur = self.conn.execute(f"SELECT pmid,json FROM docs WHERE pmid IN ({q})", pmids)
+        out = {}
+        for pmid, blob in cur.fetchall():
+            try: out[pmid] = json.loads(blob)
+            except Exception: pass
+        return out
+
+    def put_many(self, rows: Dict[str, dict]) -> int:
+        if not rows: return 0
+        data = [(pmid, json.dumps(rec)) for pmid, rec in rows.items()]
+        self.conn.executemany("INSERT OR REPLACE INTO docs(pmid,json) VALUES(?,?)", data)
+        self.conn.commit()
+        return len(data)
+
+
+
+###############################################################################
+### FILE: io/vecdb.py
+###############################################################################
+from __future__ import annotations
+import sqlite3, pathlib, hashlib
+from typing import Dict, List, Tuple, Optional
+import numpy as np
+from src.config.defaults import VEC_DB_PATH
+
+_PATH = pathlib.Path(VEC_DB_PATH)
+_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+def _hash_text(model: str, text: str) -> str:
+    h = hashlib.blake2b(digest_size=16)
+    h.update(model.encode("utf-8", "ignore") + b"\x00" + text.encode("utf-8", "ignore"))
+    return h.hexdigest()
+
+class VecDB:
+    def __init__(self, path: pathlib.Path = _PATH):
+        self.conn = sqlite3.connect(str(path))
+        self.conn.execute("""
+        CREATE TABLE IF NOT EXISTS embeds(
+          pmid TEXT NOT NULL,
+          model TEXT NOT NULL,
+          hash TEXT NOT NULL,
+          dim  INTEGER NOT NULL,
+          vec  BLOB NOT NULL,
+          PRIMARY KEY (pmid, model)
+        )""")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS ix_embeds_hash ON embeds(hash)")
+        self.conn.commit()
+
+    def get_many(self, keys: List[Tuple[str,str]]) -> Dict[Tuple[str,str], Tuple[str,int,bytes]]:
+        if not keys: return {}
+        q = ",".join(["(?,?)"]*len(keys))
+        flat = []
+        for pmid, model in keys: flat.extend([pmid, model])
+        cur = self.conn.execute(f"SELECT pmid,model,hash,dim,vec FROM embeds WHERE (pmid,model) IN ({q})", flat)
+        out = {}
+        for pmid, model, h, dim, blob in cur.fetchall():
+            out[(pmid, model)] = (h, int(dim), blob)
+        return out
+
+    def upsert_many(self, rows: List[Tuple[str,str,str,int,bytes]]) -> int:
+        if not rows: return 0
+        self.conn.executemany("INSERT OR REPLACE INTO embeds(pmid,model,hash,dim,vec) VALUES(?,?,?,?,?)", rows)
+        self.conn.commit()
+        return len(rows)
+
+    @staticmethod
+    def make_hash(model: str, text: str) -> str:
+        return _hash_text(model, text)
+
+    @staticmethod
+    def pack_vec(x: np.ndarray) -> bytes:
+        assert x.dtype == np.float32
+        return x.tobytes()
+
+    @staticmethod
+    def unpack_vec(blob: bytes, dim: int) -> np.ndarray:
+        arr = np.frombuffer(blob, dtype=np.float32)
+        if arr.size != dim:
+            raise ValueError(f"vec size {arr.size} != dim {dim}")
+        return arr
+
+
+
+###############################################################################
+### FILE: cli/main.py
+###############################################################################
+from __future__ import annotations
+import sys, os, json, typer, time, logging
+from typing import List, Dict
+from src.config.defaults import (
+    ESEARCH_RETMAX_PER_QUERY, SEED_SEM_TAU_HI, SEED_MIN_COUNT, SEED_RELAX_STEP,
+    CILE_REL_GATE_FRAC, CILE_EXT_BUDGET, CILE_MAX_ACCEPT, CILE_HUB_QUARANTINE, CILE_MIN_HUB_SOFT,
+    REG_P_HI, REG_P_LO, LLM_BUDGET, DEFAULT_LANGS, DEFAULT_YEAR_MIN
+)
+from src.config.schema import Criteria, Document, LedgerRow
+from src.text.prompts import P0_SYSTEM, p0_user_prompt
+from src.text.llm import chat_json
+from src.net.entrez import esearch, efetch_abstracts
+from src.text.embed import embed_texts
+from src.screen.gates import objective_gate, is_primary_design
+from src.screen.features import build_embeddings, compute_signals
+from src.screen.regressor import OnlineRegressor, featurize_row
+from src.screen.llm_decide import llm_decide_batch
+from src.graph.cile import one_wave_expand
+from src.io.store import ensure_run_dir, write_json, write_tsv
+
+logging.basicConfig(
+    level=os.environ.get("LOGLEVEL", "INFO"),
+    format="%(asctime)s | %(levelname)s | %(name)s: %(message)s",
+    datefmt="%H:%M:%S"
+)
+log = logging.getLogger("cli")
+
+app = typer.Typer(add_completion=False)
+
+def _to_docs(meta_map: Dict[str,dict]) -> List[Document]:
+    docs = []
+    for pmid, m in meta_map.items():
+        docs.append(Document(
+            pmid=str(pmid), title=m.get("title") or "", abstract=m.get("abstract") or "",
+            year=m.get("year"), journal=m.get("journal"), language=m.get("language"),
+            pub_types=m.get("pub_types") or [], doi=m.get("doi")
+        ))
+    return docs
+
+@app.command()
+def run(prompt: str = typer.Argument(..., help="Topic intent / preferences paragraph"),
+        languages: str = typer.Option(",".join(DEFAULT_LANGS), "--languages"),
+        year_min: int = typer.Option(DEFAULT_YEAR_MIN, "--year-min"),
+        out_dir: str = typer.Option("runs/demo", "--out"),
+        llm_budget: int = typer.Option(LLM_BUDGET, "--llm-budget"),
+        max_records: int = typer.Option(None, "--max-records", help="Dev cap: limit number of records processed"),
+        ):
+    t_start = time.monotonic()
+    run_dir = ensure_run_dir(out_dir)
+
+    try:
+        # ---- 1) P0 criteria ----
+        log.info("Phase P0: generating criteria via LLM…")
+        criteria_js = chat_json(P0_SYSTEM, p0_user_prompt(prompt))
+        # sanitize missing fields
+        if "picos" not in criteria_js:
+            criteria_js["picos"] = {"population":"","intervention":"","comparison":None,"outcomes":[],"study_design":[],
+                                    "year_min":year_min,"languages":languages.split(",")}
+        else:
+            criteria_js["picos"].setdefault("year_min", year_min)
+            # normalize languages to names, not codes
+            langs = languages.split(",")
+            criteria_js["picos"].setdefault("languages", langs)
+            if isinstance(criteria_js["picos"]["languages"], list) and all(len(x)<=3 for x in criteria_js["picos"]["languages"]):
+                criteria_js["picos"]["languages"] = langs
+        criteria = Criteria(**criteria_js)
+        write_json(run_dir/"criteria.json", criteria.model_dump())
+        log.info(f"Phase P0 done in {time.monotonic()-t_start:.1f}s")
+
+        # ---- 2) Retrieval ----
+        log.info("Retrieval: esearch…")
+        pmid_set = set()
+        for name, q in criteria.boolean_queries.items():
+            ids = esearch(q, retmax=ESEARCH_RETMAX_PER_QUERY, mindate=criteria.picos.year_min)
+            pmid_set.update(ids)
+        pmids = list(pmid_set)
+        if max_records:
+            pmids = pmids[:max_records]
+            log.info(f"Dev cap: limiting to first {len(pmids)} records")
+
+        log.info(f"Retrieval: efetch abstracts for {len(pmids)} PMIDs…")
+        meta = efetch_abstracts(pmids, workers=3, use_cache=True)
+        write_json(run_dir/"retrieval.json", {"pmids": pmids, "hits": len(meta)})
+
+        docs = _to_docs(meta)
+        if not docs:
+            log.error("No records retrieved.")
+            raise typer.Exit(code=1)
+
+        # ---- 3) Embeddings & intent vector ----
+        log.info(f"Embedding {len(docs)} documents…")
+        emb, idx = build_embeddings(docs)
+        intent_vec = embed_texts([prompt])[0]
+
+        # ---- 4) Seeds S+ ----
+        tau = SEED_SEM_TAU_HI
+        seeds = [d.pmid for d in docs if is_primary_design(d) and (float(emb[idx[d.pmid]] @ intent_vec) >= tau)]
+        while len(seeds) < SEED_MIN_COUNT and tau > 0.80:
+            tau -= SEED_RELAX_STEP
+            seeds = [d.pmid for d in docs if is_primary_design(d) and (float(emb[idx[d.pmid]] @ intent_vec) >= tau)]
+        log.info(f"Seeds: {len(seeds)} at tau={tau:.2f}")
+
+        # ---- 5) CILE expansion (1 wave) ----
+        H0 = set(int(x) for x in seeds)
+        H1, meta_cile = one_wave_expand(
+            seeds_pos=[int(x) for x in seeds],
+            H_existing=H0,
+            rel_gate_frac=CILE_REL_GATE_FRAC,
+            external_budget=CILE_EXT_BUDGET,
+            max_accept=CILE_MAX_ACCEPT,
+            hub_quarantine_external=CILE_HUB_QUARANTINE,
+            min_hub_soft=CILE_MIN_HUB_SOFT
+        )
+        new_pmids = [str(x) for x in list(H1 - H0)]
+        if new_pmids:
+            log.info(f"CILE added {len(new_pmids)} new PMIDs; fetching their abstracts…")
+            extra = efetch_abstracts(new_pmids, workers=3, use_cache=True)
+            meta.update(extra)
+            docs = _to_docs(meta)
+            emb, idx = build_embeddings(docs)  # extend embedding matrix
+
+        # ---- 6) Signals ----
+        log.info("Computing signals…")
+        signals = compute_signals(docs, emb, idx, intent_vec, seeds, criteria.picos.year_min or year_min)
+
+        # ---- 7) Objective gates + 8) Regressor + 9) Model triage + 10) LLM ----
+        log.info("Screening…")
+        ledger: List[LedgerRow] = []
+        pool_for_model = []
+        for d in docs:
+            g = objective_gate(d, criteria.picos)
+            if g is not None:
+                reason_code, reason = g
+                row = LedgerRow(
+                    pmid=d.pmid, lane_before_llm="auto_exclude", gate_reason=reason,
+                    model_p=None, llm=None,
+                    final_decision="exclude", final_reason=reason,
+                    signals=signals[d.pmid], pub_types=d.pub_types, year=d.year,
+                    title=d.title, abstract=d.abstract
+                )
+                ledger.append(row)
+            else:
+                sig = signals[d.pmid]
+                if (is_primary_design(d) and sig.sem_intent >= 0.92 and (sig.graph_ppr_pct >= 90.0 or sig.graph_links_frac >= 0.20)):
+                    row = LedgerRow(
+                        pmid=d.pmid, lane_before_llm="auto_include", gate_reason=None,
+                        model_p=1.0, llm=None,
+                        final_decision="include", final_reason="insufficient_info",
+                        signals=sig, pub_types=d.pub_types, year=d.year,
+                        title=d.title, abstract=d.abstract
+                    )
+                    ledger.append(row)
+                else:
+                    pool_for_model.append(d)
+
+        import numpy as np
+        X_boot, y_boot = [], []
+        seed_set = set(seeds)
+        for d in docs:
+            sig = signals[d.pmid]
+            X_boot.append(featurize_row(sig, d))
+            y_boot.append(1 if d.pmid in seed_set else 0)
+        X_boot = np.stack(X_boot, axis=0); y_boot = np.array(y_boot, dtype="int64")
+        reg = OnlineRegressor()
+        reg.fit_bootstrap(X_boot, y_boot)
+
+        uncertain_docs = []
+        for d in pool_for_model:
+            p = float(reg.predict_proba(np.stack([featurize_row(signals[d.pmid], d)], axis=0))[0])
+            if p >= REG_P_HI:
+                ledger.append(LedgerRow(pmid=d.pmid, lane_before_llm="model_include", gate_reason=None, model_p=p, llm=None,
+                                        final_decision="include", final_reason="insufficient_info",
+                                        signals=signals[d.pmid], pub_types=d.pub_types, year=d.year, title=d.title, abstract=d.abstract))
+            elif p <= REG_P_LO:
+                ledger.append(LedgerRow(pmid=d.pmid, lane_before_llm="model_exclude", gate_reason="off_topic", model_p=p, llm=None,
+                                        final_decision="exclude", final_reason="off_topic",
+                                        signals=signals[d.pmid], pub_types=d.pub_types, year=d.year, title=d.title, abstract=d.abstract))
+            else:
+                uncertain_docs.append(d)
+
+        if uncertain_docs:
+            ps = []
+            for d in uncertain_docs:
+                p = float(reg.predict_proba(np.stack([featurize_row(signals[d.pmid], d)], axis=0))[0])
+                ps.append((d, abs(p - 0.5), p))
+            ps.sort(key=lambda t: t[1])
+            to_llm = [d for d,_,_ in ps[:llm_budget]]
+            llm_out = llm_decide_batch(criteria, to_llm, signals)
+            X_upd, y_upd = [], []
+            for dec in llm_out:
+                d = next(dd for dd in to_llm if dd.pmid == dec.pmid)
+                row = LedgerRow(
+                    pmid=d.pmid, lane_before_llm="sent_to_llm", gate_reason=None, model_p=None,
+                    llm=dec, final_decision=dec.decision,
+                    final_reason=dec.primary_reason,
+                    signals=signals[d.pmid], pub_types=d.pub_types, year=d.year,
+                    title=d.title, abstract=d.abstract
+                )
+                ledger.append(row)
+                if dec.decision == "include":
+                    X_upd.append(featurize_row(signals[d.pmid], d)); y_upd.append(1)
+                elif dec.decision == "exclude":
+                    X_upd.append(featurize_row(signals[d.pmid], d)); y_upd.append(0)
+            if X_upd:
+                reg.partial_update(np.stack(X_upd, axis=0), np.array(y_upd, dtype="int64"))
+            skipped = set(dd.pmid for dd,_,_ in ps[llm_budget:])
+            for d in uncertain_docs:
+                if d.pmid in skipped:
+                    ledger.append(LedgerRow(
+                        pmid=d.pmid, lane_before_llm="uncertain", gate_reason=None, model_p=None, llm=None,
+                        final_decision="borderline", final_reason="insufficient_info",
+                        signals=signals[d.pmid], pub_types=d.pub_types, year=d.year,
+                        title=d.title, abstract=d.abstract
+                    ))
+
+        # ---- 11) Outputs ----
+        fieldnames = ["pmid","lane_before_llm","gate_reason","model_p","final_decision","final_reason","year","pub_types","title","abstract"]
+        rows = []
+        for r in ledger:
+            rows.append({
+                "pmid": r.pmid,
+                "lane_before_llm": r.lane_before_llm,
+                "gate_reason": r.gate_reason or "",
+                "model_p": "" if r.model_p is None else f"{r.model_p:.3f}",
+                "final_decision": r.final_decision,
+                "final_reason": r.final_reason,
+                "year": r.year or "",
+                "pub_types": ";".join(r.pub_types),
+                "title": r.title.replace("\t"," ").replace("\n"," ").strip(),
+                "abstract": (r.abstract or "").replace("\t"," ").replace("\n"," ").strip(),
+            })
+        write_tsv(run_dir/"screening.tsv", rows, fieldnames)
+
+        from src.prisma.counts import prisma_counts
+        write_json(run_dir/"prisma.json", prisma_counts([r for r in ledger]))
+        write_json(run_dir/"cile.json", meta_cile)
+
+        log.info(f"Done in {time.monotonic()-t_start:.1f}s. Records: {len(docs)} | Ledger: {len(ledger)} | Out: {run_dir}")
+
+    except KeyboardInterrupt:
+        log.warning("Interrupted by user (Ctrl-C). Partial results saved where available.")
+        raise
+
+
+
+###############################################################################
+### FILE: config/defaults.py
+###############################################################################
+from __future__ import annotations
+import os
+
+# ---- External services ----
+LMSTUDIO_BASE    = os.getenv("LMSTUDIO_BASE", "http://127.0.0.1:1234")
+LMSTUDIO_EMB     = os.getenv("LMSTUDIO_EMB_MODEL", "text-embedding-qwen3-embedding-0.6b")
+LMSTUDIO_CHAT    = os.getenv("LMSTUDIO_CHAT_MODEL", "gemma-3n-e2b-it")
+
+ENTREZ_EMAIL     = os.getenv("ENTREZ_EMAIL", "you@example.com")
+ENTREZ_API_KEY   = os.getenv("ENTREZ_API_KEY", "")
+HTTP_TIMEOUT     = int(os.getenv("HTTP_TIMEOUT", "30"))
+USER_AGENT       = os.getenv("USER_AGENT", "sr-screener/0.1 (+local)")
+
+ICITE_BASE       = os.getenv("ICITE_BASE", "https://icite.od.nih.gov/api/pubs")
+
+# ---- Retrieval ----
+ESEARCH_RETMAX_PER_QUERY = int(os.getenv("ESEARCH_RETMAX_PER_QUERY", "2000"))
+
+# ---- FS (define early; used by VEC_DB_PATH) ----
+DATA_DIR         = os.getenv("DATA_DIR", "data")
+RUNS_DIR         = os.getenv("RUNS_DIR", "runs")
+
+# ---- Embeddings ----
+EMB_BATCH        = int(os.getenv("EMB_BATCH", "48"))
+
+# ---- Embedding controls / cache ----
+EMB_AUTO_BATCH        = os.getenv("EMB_AUTO_BATCH", "1") == "1"
+EMB_MAX_CHARS_PER_DOC = int(os.getenv("EMB_MAX_CHARS_PER_DOC", "12000"))
+EMB_RETRY_BACKOFF_S   = float(os.getenv("EMB_RETRY_BACKOFF_S", "1.2"))
+EMB_RETRY_MAX         = int(os.getenv("EMB_RETRY_MAX", "4"))
+
+# ---- Vector DB (sqlite) ----
+VEC_DB_PATH      = os.getenv("VEC_DB_PATH", os.path.join(DATA_DIR, "cache", "vectors.sqlite3"))
+
+# ---- Seeds & thresholds ----
+SEED_SEM_TAU_HI  = float(os.getenv("SEED_SEM_TAU_HI", "0.92"))
+SEED_MIN_COUNT   = int(os.getenv("SEED_MIN_COUNT", "8"))
+SEED_RELAX_STEP  = float(os.getenv("SEED_RELAX_STEP", "0.02"))
+
+# ---- CILE knobs ----
+CILE_REL_GATE_FRAC      = float(os.getenv("CILE_REL_GATE_FRAC", "0.08"))
+CILE_EXT_BUDGET         = int(os.getenv("CILE_EXT_BUDGET", "2500"))
+CILE_MAX_ACCEPT         = int(os.getenv("CILE_MAX_ACCEPT", "600"))
+CILE_HUB_QUARANTINE     = os.getenv("CILE_HUB_QUARANTINE", "1") == "1"
+CILE_MIN_HUB_SOFT       = int(os.getenv("CILE_MIN_HUB_SOFT", "450"))
+
+# ---- Regressor thresholds ----
+REG_P_HI         = float(os.getenv("REG_P_HI", "0.85"))
+REG_P_LO         = float(os.getenv("REG_P_LO", "0.15"))
+
+# ---- LLM budget ----
+LLM_BUDGET       = int(os.getenv("LLM_BUDGET", "150"))
+
+# ---- Languages & year defaults ----
+DEFAULT_LANGS    = os.getenv("DEFAULT_LANGS", "English,Portuguese,Spanish").split(",")
+DEFAULT_YEAR_MIN = int(os.getenv("DEFAULT_YEAR_MIN", "2000"))
+
+# ---- FS ----
+DATA_DIR         = os.getenv("DATA_DIR", "data")
+RUNS_DIR         = os.getenv("RUNS_DIR", "runs")
+
+
+
+###############################################################################
+### FILE: config/schema.py
+###############################################################################
+# src/config/schema.py
+from __future__ import annotations
+from typing import List, Dict, Optional, Literal, Any
+from pydantic import BaseModel, Field
+
+Reason = Literal[
+    "design_mismatch","population_mismatch","intervention_mismatch",
+    "language","year","insufficient_info","off_topic"
+]
+
+class PICOS(BaseModel):
+    population: str
+    intervention: str
+    comparison: Optional[str] = None
+    outcomes: List[str]
+    study_design: List[str]
+    year_min: Optional[int] = None
+    languages: List[str] = ["English"]
+
+class Criteria(BaseModel):
+    picos: PICOS
+    # <-- be permissive; the LLM may return lists/ints/bools etc.
+    inclusion_criteria: Dict[str, Any] = Field(default_factory=dict)
+    exclusion_criteria: Dict[str, Any] = Field(default_factory=dict)
+    # be flexible here too
+    reason_taxonomy: List[str] = Field(default_factory=list)
+    boolean_queries: Dict[str, str] = Field(default_factory=dict)
+
+class Document(BaseModel):
+    pmid: str
+    title: Optional[str] = ""
+    abstract: Optional[str] = ""
+    year: Optional[int] = None
+    journal: Optional[str] = None
+    language: Optional[str] = None
+    pub_types: List[str] = []
+    doi: Optional[str] = None
+
+class Signals(BaseModel):
+    sem_intent: float
+    sem_seed: float
+    graph_ppr_pct: float
+    graph_links_frac: float
+    year_scaled: float
+    abstract_len_bin: Literal["none","short","normal","long"]
+
+class DecisionLLM(BaseModel):
+    pmid: str
+    decision: Literal["include","exclude","borderline"]
+    primary_reason: Reason
+    confidence: float
+    evidence: Dict[str, str]
+
+class LedgerRow(BaseModel):
+    pmid: str
+    lane_before_llm: Literal["auto_exclude","auto_include","sent_to_llm","model_exclude","model_include","uncertain"]
+    gate_reason: Optional[Reason] = None
+    model_p: Optional[float] = None
+    llm: Optional[DecisionLLM] = None
+    final_decision: Literal["include","exclude","borderline"]
+    final_reason: Reason
+    signals: Signals
+    pub_types: List[str]
+    year: Optional[int]
+    title: str
+    abstract: str
+
+
+
+###############################################################################
+### FILE: graph/cile.py
+###############################################################################
+from __future__ import annotations
+from typing import List, Dict, Set, Tuple
+import random
+from src.net.icite import icite_neighbors_map, icite_degree_total
+
+def one_wave_expand(
+    seeds_pos: List[int],
+    H_existing: Set[int] | None,
+    rel_gate_frac: float = 0.08,
+    external_budget: int = 2500,
+    max_accept: int = 600,
+    hub_quarantine_external: bool = True,
+    min_hub_soft: int = 450,
+    rng_seed: int = 13
+) -> Tuple[Set[int], Dict[str,int]]:
+    random.seed(rng_seed)
+    seeds_pos = [int(x) for x in seeds_pos]
+    H_set = set(H_existing or set())
+    neigh_map = icite_neighbors_map([str(s) for s in seeds_pos])
+    neighborhood: Set[int] = set()
+    for s in seeds_pos:
+        neighborhood |= set(neigh_map.get(str(s), set()))
+        neighborhood.add(s)
+    candidates = list(neighborhood - H_set)
+    accepted: List[Tuple[int,int]] = []
+    total_ext = 0
+    tmp = []
+    for v in candidates:
+        deg_tot = icite_degree_total(v)
+        if deg_tot <= 0:
+            continue
+        vn = neigh_map.get(str(v))
+        if vn is None:
+            vn = icite_neighbors_map([str(v)]).get(str(v), set())
+        rel = len(set(int(x) for x in vn) & set(seeds_pos)) / max(1, deg_tot)
+        if rel < rel_gate_frac:
+            continue
+        ext = len(set(int(x) for x in vn) - H_set)
+        if hub_quarantine_external and ext >= min_hub_soft:
+            continue
+        tmp.append((v, ext))
+    tmp.sort(key=lambda t: (t[1], t[0]))
+    for v, ext in tmp:
+        if total_ext + ext > external_budget:
+            continue
+        accepted.append((v, ext))
+        total_ext += ext
+        if len(accepted) >= max_accept:
+            break
+    acc_nodes = set(v for v, _ in accepted)
+    meta = {"H_prev": len(H_set), "neighborhood": len(neighborhood), "candidates": len(candidates),
+            "accepted": len(acc_nodes), "sum_ext_after": total_ext}
+    return (H_set | acc_nodes), meta
+
+
+
+###############################################################################
+### FILE: io/store.py
+###############################################################################
+from __future__ import annotations
+import os, pathlib, json, csv
+from typing import Any, List, Dict
+from src.config.defaults import RUNS_DIR
+
+def ensure_run_dir(out_dir: str) -> pathlib.Path:
+    p = pathlib.Path(out_dir) if out_dir else pathlib.Path(RUNS_DIR) / "run"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+def write_json(path: pathlib.Path, obj: Any):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+
+def write_tsv(path: pathlib.Path, rows: List[Dict[str,Any]], fieldnames: List[str]):
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, delimiter="\t", fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+
+
+###############################################################################
+### FILE: net/entrez.py
+###############################################################################
+from __future__ import annotations
+import requests, re, time, math, concurrent.futures, xml.etree.ElementTree as ET
+from typing import List, Dict, Any, Iterable, Optional, Tuple
+import logging
+from src.config.defaults import ENTREZ_EMAIL, ENTREZ_API_KEY, HTTP_TIMEOUT, USER_AGENT
+from src.io.docdb import DocDB
+
+EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+log = logging.getLogger("entrez")
+
+def esearch(query: str, db: str = "pubmed", retmax: int = 10000, mindate: Optional[int]=None, maxdate: Optional[int]=None, sort: str="date") -> List[str]:
+    params = {"db": db, "term": query, "retmode": "json", "retmax": retmax, "sort": sort, "email": ENTREZ_EMAIL}
+    if ENTREZ_API_KEY: params["api_key"] = ENTREZ_API_KEY
+    if mindate: params["mindate"] = str(mindate)
+    if maxdate: params["maxdate"] = str(maxdate)
+    r = requests.get(f"{EUTILS}/esearch.fcgi", headers=HEADERS, params=params, timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    return r.json().get("esearchresult", {}).get("idlist", [])
+
+def _parse_pubmed_xml(xml_text: str) -> Dict[str, Dict[str,Any]]:
+    out: Dict[str,Dict[str,Any]] = {}
+    root = ET.fromstring(xml_text)
+    def _join(node) -> str:
+        if node is None: return ""
+        try: return "".join(node.itertext())
+        except Exception: return (getattr(node, "text", None) or "")
+    for art in root.findall(".//PubmedArticle"):
+        pmid = art.findtext(".//PMID") or ""
+        title = _join(art.find(".//ArticleTitle")).strip()
+        abs_nodes = art.findall(".//Abstract/AbstractText")
+        abstract = " ".join(_join(n).strip() for n in abs_nodes) if abs_nodes else ""
+        year = None
+        for path in (".//ArticleDate/Year",".//PubDate/Year",".//DateCreated/Year",".//PubDate/MedlineDate"):
+            s = art.findtext(path)
+            if s:
+                m = re.search(r"\d{4}", s)
+                if m: year = int(m.group(0)); break
+        journal = art.findtext(".//Journal/Title") or ""
+        pubtypes = [pt.text for pt in art.findall(".//PublicationTypeList/PublicationType") if pt.text]
+        doi = None
+        for idn in art.findall(".//ArticleIdList/ArticleId"):
+            if (idn.attrib.get("IdType","").lower()=="doi") and idn.text:
+                doi = idn.text.strip().lower()
+        lang = art.findtext(".//Language") or None
+        out[pmid] = {"pmid": pmid, "title": title, "abstract": abstract, "year": year,
+                     "journal": journal, "pub_types": pubtypes, "doi": doi, "language": lang}
+    return out
+
+def _efetch_chunk(chunk: List[str]) -> Dict[str, Dict[str,Any]]:
+    params = {"db":"pubmed", "retmode":"xml", "rettype":"abstract", "id":",".join(chunk), "email":ENTREZ_EMAIL}
+    if ENTREZ_API_KEY: params["api_key"] = ENTREZ_API_KEY
+    r = requests.get(f"{EUTILS}/efetch.fcgi", headers={"User-Agent":USER_AGENT}, params=params, timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    return _parse_pubmed_xml(r.text)
+
+def efetch_abstracts(pmids: Iterable[str], chunk_size: int = 200, workers: int = 3, use_cache: bool = True) -> Dict[str, Dict[str,Any]]:
+    """Polite parallel efetch with caching + progress logs."""
+    pmids = [str(p) for p in pmids]
+    if not pmids: return {}
+
+    cache = DocDB() if use_cache else None
+    have: Dict[str,Dict[str,Any]] = {}
+    todo = pmids
+
+    if cache:
+        cached = cache.get_many(pmids)
+        if cached:
+            for k, v in cached.items():
+                have[k] = v
+            todo = [p for p in pmids if p not in cached]
+
+    log.info(f"efetch: total={len(pmids)} (cache hit={len(have)}, miss={len(todo)}), chunk={chunk_size}, workers={workers}")
+
+    if not todo:
+        return have
+
+    chunks = [todo[i:i+chunk_size] for i in range(0, len(todo), chunk_size)]
+    # Courtesy: limit concurrency; add slight pacing between submissions to avoid burst.
+    results: Dict[str,Dict[str,Any]] = {}
+    submitted = 0
+    t0 = time.monotonic()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = []
+        for ch in chunks:
+            futs.append(ex.submit(_efetch_chunk, ch))
+            submitted += 1
+            time.sleep(0.10)  # tiny stagger
+
+        done = 0
+        for fut in concurrent.futures.as_completed(futs):
+            try:
+                part = fut.result()
+                results.update(part)
+            except Exception as e:
+                log.warning(f"efetch chunk failed: {e}")
+            done += 1
+            if done % 3 == 0 or done == len(chunks):
+                dt = time.monotonic() - t0
+                log.info(f"efetch progress {done}/{len(chunks)} chunks | items={sum(len(c) for c in chunks[:done])}/{len(todo)} | {dt:.1f}s")
+
+            # polite global pacing (aim ~3-5 req/s overall)
+            time.sleep(0.05)
+
+    # merge + persist
+    have.update(results)
+    if cache and results:
+        cache.put_many(results)
+
+    return have
+
+
+
+###############################################################################
+### FILE: net/icite.py
+###############################################################################
+from __future__ import annotations
+import requests, sqlite3, json, pathlib, time
+from typing import Dict, List
+from src.config.defaults import ICITE_BASE, HTTP_TIMEOUT, USER_AGENT, DATA_DIR
+
+HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+CACHE_DIR = pathlib.Path(DATA_DIR) / "cache"
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = CACHE_DIR / "icite.sqlite3"
+
+class ICiteCache:
+    def __init__(self, path: pathlib.Path = DB_PATH):
+        self._conn = sqlite3.connect(str(path))
+        self._conn.execute("""CREATE TABLE IF NOT EXISTS pubs(
+            pmid TEXT PRIMARY KEY, json TEXT NOT NULL
+        )""")
+        self._conn.commit()
+
+    def get_many(self, pmids: List[str]) -> Dict[str, dict]:
+        if not pmids: return {}
+        q = ",".join("?"*len(pmids))
+        cur = self._conn.execute(f"SELECT pmid,json FROM pubs WHERE pmid IN ({q})", pmids)
+        out = {}
+        for pmid, blob in cur.fetchall():
+            try: out[pmid] = json.loads(blob)
+            except Exception: pass
+        return out
+
+    def put_many(self, rows: List[dict]) -> int:
+        data = []
+        for rec in rows:
+            pmid = str(rec.get("pmid") or rec.get("_id") or "")
+            if not pmid: continue
+            data.append((pmid, json.dumps(rec)))
+        if not data: return 0
+        self._conn.executemany("INSERT OR REPLACE INTO pubs(pmid,json) VALUES(?,?)", data)
+        self._conn.commit()
+        return len(data)
+
+def icite_pubs_fetch(pmids: List[str]) -> List[dict]:
+    out: List[dict] = []
+    base = ICITE_BASE.rstrip("/")
+    for i in range(0, len(pmids), 200):
+        sub = pmids[i:i+200]
+        params = {"pmids": ",".join(sub), "legacy": "false"}
+        r = requests.get(base, headers=HEADERS, params=params, timeout=HTTP_TIMEOUT)
+        r.raise_for_status()
+        data = r.json().get("data", r.json())
+        if isinstance(data, list):
+            out.extend(data)
+        time.sleep(0.34)
+    return out
+
+def icite_neighbors_map(pmids: List[str]) -> Dict[str, set]:
+    cache = ICiteCache()
+    have = cache.get_many(pmids)
+    need = [p for p in pmids if p not in have]
+    if need:
+        rows = icite_pubs_fetch(need)
+        cache.put_many(rows)
+        for rec in rows:
+            have[str(rec.get("pmid") or rec.get("_id"))] = rec
+    m = {}
+    for p, rec in have.items():
+        cited_by = rec.get("citedByPmids", []) or rec.get("cited_by") or []
+        refs     = rec.get("citedPmids", [])   or rec.get("references") or []
+        m[p] = set(int(x) for x in (cited_by + refs) if x)
+    return m
+
+def icite_degree_total(pmid: int) -> int:
+    cache = ICiteCache()
+    have = cache.get_many([str(pmid)])
+    rec = have.get(str(pmid), {})
+    cited_by = rec.get("citedByPmids", []) or rec.get("cited_by") or []
+    refs     = rec.get("citedPmids", [])   or rec.get("references") or []
+    return len(cited_by) + len(refs)
+
+
+
+###############################################################################
+### FILE: prisma/counts.py
+###############################################################################
+from __future__ import annotations
+from typing import List, Dict, Any
+from collections import Counter
+from src.config.schema import LedgerRow
+
+def prisma_counts(ledger: List[LedgerRow]) -> Dict[str, Any]:
+    N = len(ledger)
+    decided = Counter(r.final_decision for r in ledger)
+    reasons = Counter(r.final_reason for r in ledger)
+    return {
+        "records_screened": N,
+        "included": decided.get("include", 0),
+        "excluded": decided.get("exclude", 0),
+        "borderline": decided.get("borderline", 0),
+        "exclusions_by_reason": dict(reasons),
+    }
+
+
+
+###############################################################################
+### FILE: screen/features.py
+###############################################################################
+from __future__ import annotations
+from typing import Dict, List, Tuple
+import numpy as np
+import networkx as nx
+import logging
+from src.config.schema import Document, Signals
+from src.text.embed import embed_texts, embed_docs_with_cache
+from src.net.icite import icite_neighbors_map
+
+log = logging.getLogger("features")
+
+def _band_sem(x: float) -> str:
+    if x >= 0.90: return "Very high"
+    if x >= 0.85: return "High"
+    if x >= 0.75: return "Medium"
+    return "Low"
+
+def abstract_len_bin(txt: str) -> str:
+    if not txt: return "none"
+    n = len(txt)
+    if n < 400: return "short"
+    if n < 2400: return "normal"
+    return "long"
+
+def build_embeddings(docs: List[Document]) -> Tuple[np.ndarray, Dict[str,int]]:
+    pmids = [d.pmid for d in docs]
+    texts = [ (d.title or "") + "\n" + (d.abstract or "") for d in docs ]
+    mat, idx = embed_docs_with_cache(pmids, texts)
+    return mat, idx
+
+def cosine(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.dot(a,b) / (np.linalg.norm(a)*np.linalg.norm(b) + 1e-12))
+
+def compute_signals(
+    docs: List[Document],
+    emb: np.ndarray,
+    idx: Dict[str,int],
+    intent_vec: np.ndarray,
+    seed_pmids: List[str],
+    year_min: int | None
+) -> Dict[str, Signals]:
+    seed_idx = [idx[p] for p in seed_pmids if p in idx]
+    if seed_idx:
+        cent = emb[seed_idx].mean(axis=0); cent /= (np.linalg.norm(cent)+1e-12)
+    else:
+        cent = intent_vec
+    pmids = [d.pmid for d in docs]
+    neigh_map = icite_neighbors_map(pmids)
+    G = nx.Graph()
+    for i,p in enumerate(pmids):
+        G.add_node(p)
+    for p in pmids:
+        ns = neigh_map.get(p, set())
+        for q in ns:
+            if str(q) in idx: G.add_edge(p, str(q))
+    seeds = [p for p in seed_pmids if p in idx]
+    if seeds:
+        personalize = {p: 1.0/len(seeds) for p in seeds}
+        ppr = nx.pagerank(G, alpha=0.85, personalization=personalize, max_iter=100)
+        vals = np.array(list(ppr.values()), dtype="float32")
+        ranks = {k: 100.0 * (float(np.sum(vals <= v)) / max(1,len(vals))) for k,v in ppr.items()}
+    else:
+        ppr = {p: 0.0 for p in pmids}
+        ranks = {p: 0.0 for p in pmids}
+    seeds_set = set(seeds)
+    signals: Dict[str, Signals] = {}
+    for d in docs:
+        v = emb[idx[d.pmid]]
+        sem_intent = cosine(v, intent_vec)
+        sem_seed   = cosine(v, cent)
+        neighbors = neigh_map.get(d.pmid, set())
+        links_frac = 0.0
+        if neighbors:
+            links_frac = len(set(str(x) for x in neighbors) & seeds_set) / float(len(neighbors))
+        ys = 0.0
+        if year_min and d.year is not None:
+            ys = max(0.0, min(1.0, (d.year - year_min) / (2025 - year_min)))
+        signals[d.pmid] = Signals(
+            sem_intent=sem_intent,
+            sem_seed=sem_seed,
+            graph_ppr_pct=float(ranks.get(d.pmid, 0.0)),
+            graph_links_frac=float(links_frac),
+            year_scaled=float(ys),
+            abstract_len_bin=abstract_len_bin(d.abstract or "")
+        )
+    return signals
+
+def signal_card(sig) -> str:
+    return (f"Signals:\n"
+            f"- Semantic match: {_band_sem(sig.sem_intent)} ({sig.sem_intent:.2f}) to intent; "
+            f"seed-centroid {_band_sem(sig.sem_seed)} ({sig.sem_seed:.2f}).\n"
+            f"- Graph locality: {'High' if sig.graph_ppr_pct>=90.0 else 'Medium' if sig.graph_ppr_pct>=60.0 else 'Low'} — "
+            f"links_to_seeds {100.0*sig.graph_links_frac:.1f}%, PPR {sig.graph_ppr_pct:.0f}th pct.\n"
+            f"- Abstract: {sig.abstract_len_bin}.")
+
+
+
+###############################################################################
+### FILE: screen/gates.py
+###############################################################################
+from __future__ import annotations
+from typing import Optional, Tuple
+from src.config.schema import Document, PICOS, Reason
+
+PRIMARY_TYPES = {"Randomized Controlled Trial","Clinical Trial","Cohort Studies","Case-Control Studies","Observational Study","Controlled Clinical Trial","Prospective Studies"}
+NON_PRIMARY_TYPES = {"Review","Meta-Analysis","Editorial","Letter","Comment","News","Case Reports","Guideline"}
+
+def objective_gate(doc: Document, picos: PICOS) -> Optional[Tuple[str, Reason]]:
+    if picos.year_min and doc.year is not None and doc.year < int(picos.year_min):
+        return ("year", "year")
+    if picos.languages and doc.language and doc.language not in picos.languages:
+        return ("language", "language")
+    if (not (doc.title or "").strip()) and (not (doc.abstract or "").strip()):
+        return ("insufficient_info", "insufficient_info")
+    if set(doc.pub_types) & NON_PRIMARY_TYPES:
+        return ("design_mismatch", "design_mismatch")
+    return None
+
+def is_primary_design(doc: Document) -> bool:
+    return bool(set(doc.pub_types) & PRIMARY_TYPES)
+
+
+
+###############################################################################
+### FILE: screen/llm_decide.py
+###############################################################################
+from __future__ import annotations
+from typing import List
+from src.config.schema import Criteria, Document, DecisionLLM
+from src.text.llm import chat_json
+from src.text.prompts import P1_SYSTEM
+from src.screen.features import signal_card
+
+def llm_decide_batch(criteria: Criteria, docs: List[Document], signals_map: dict, temperature: float = 0.1) -> List[DecisionLLM]:
+    out = []
+    for d in docs:
+        sig = signals_map[d.pmid]
+        user = (
+            f"CRITERIA_JSON:\n{criteria.model_dump_json()}\n\n"
+            f"RECORD:\n{d.model_dump_json()}\n\n"
+            f"{signal_card(sig)}\n"
+            "Return the JSON now."
+        )
+        resp = chat_json(P1_SYSTEM, user, temperature=temperature, max_tokens=600)
+        out.append(DecisionLLM(**resp))
+    return out
+
+
+
+###############################################################################
+### FILE: screen/regressor.py
+###############################################################################
+from __future__ import annotations
+from typing import Dict, List, Tuple
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import SGDClassifier
+
+PRIMARY_TYPES = {"Randomized Controlled Trial","Clinical Trial","Cohort Studies","Case-Control Studies","Observational Study","Controlled Clinical Trial","Prospective Studies"}
+NON_PRIMARY_TYPES = {"Review","Meta-Analysis","Editorial","Letter","Comment","News","Case Reports","Guideline"}
+
+def featurize_row(sig, doc) -> np.ndarray:
+    # Continuous features + simple one-hots
+    f = [
+        sig.sem_intent, sig.sem_seed, sig.graph_ppr_pct/100.0, sig.graph_links_frac,
+        sig.year_scaled,
+        1.0 if sig.abstract_len_bin=="none" else 0.0,
+        1.0 if sig.abstract_len_bin=="short" else 0.0,
+        1.0 if sig.abstract_len_bin=="normal" else 0.0,
+        1.0 if sig.abstract_len_bin=="long" else 0.0,
+        1.0 if (set(doc.pub_types) & PRIMARY_TYPES) else 0.0,
+        1.0 if (set(doc.pub_types) & NON_PRIMARY_TYPES) else 0.0,
+    ]
+    return np.array(f, dtype="float32")
+
+class OnlineRegressor:
+    def __init__(self):
+        self.scaler = StandardScaler(with_mean=True, with_std=True)
+        self.clf = SGDClassifier(loss="log_loss", penalty="l2", alpha=1e-4, max_iter=1000, tol=1e-3, random_state=17)
+        self._fitted = False
+
+    def fit_bootstrap(self, X: np.ndarray, y: np.ndarray):
+        # Scale then partial_fit
+        self.scaler.fit(X)
+        Xs = self.scaler.transform(X)
+        self.clf.partial_fit(Xs, y, classes=np.array([0,1]))
+        self._fitted = True
+
+    def partial_update(self, X: np.ndarray, y: np.ndarray):
+        Xs = self.scaler.transform(X)
+        self.clf.partial_fit(Xs, y)
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        Xs = self.scaler.transform(X)
+        p = self.clf.predict_proba(Xs)[:,1]
+        return p
+
+
+
+###############################################################################
+### FILE: text/embed.py
+###############################################################################
+from __future__ import annotations
+import os, time, json, math, subprocess, shutil, logging
+from typing import List, Dict, Tuple, Optional
+import numpy as np, requests
+
+from src.config.defaults import (
+    LMSTUDIO_BASE, LMSTUDIO_EMB, HTTP_TIMEOUT, USER_AGENT,
+    EMB_BATCH, EMB_AUTO_BATCH, EMB_MAX_CHARS_PER_DOC,
+    EMB_RETRY_BACKOFF_S, EMB_RETRY_MAX
+)
+from src.io.vecdb import VecDB
+
+HEADERS = {"Content-Type":"application/json","User-Agent":USER_AGENT}
+log = logging.getLogger("embed")
+
+def _setup_logger_once():
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=os.environ.get("LOGLEVEL","INFO"),
+            format="%(asctime)s | %(levelname)s | %(name)s: %(message)s",
+            datefmt="%H:%M:%S"
+        )
+
+_setup_logger_once()
+
+def _estimate_tokens(s: str) -> int:
+    # Rough: ~ 1 token ≈ 4 chars (English-ish)
+    return max(1, int(len(s) / 4))
+
+def _truncate(s: str, max_chars: int) -> str:
+    if max_chars and len(s) > max_chars:
+        return s[:max_chars]
+    return s
+
+def _detect_vram_mb() -> Optional[int]:
+    # Try torch first
+    try:
+        import torch  # type: ignore
+        if torch.cuda.is_available():
+            free, total = torch.cuda.mem_get_info()  # bytes
+            return int(free // (1024*1024))
+    except Exception:
+        pass
+    # nvidia-smi
+    nvsmi = shutil.which("nvidia-smi")
+    if nvsmi:
+        try:
+            out = subprocess.check_output(
+                [nvsmi, "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                stderr=subprocess.DEVNULL, text=True, timeout=2.0
+            )
+            vals = [int(x.strip()) for x in out.strip().splitlines() if x.strip().isdigit()]
+            if vals:
+                # if multi-GPU, take max free
+                return max(vals)
+        except Exception:
+            pass
+    return None
+
+def _choose_batch_size(auto: bool, default_batch: int) -> int:
+    if not auto:
+        return default_batch
+    free_mb = _detect_vram_mb()
+    if free_mb is None:
+        # unknown; be conservative
+        return min(default_batch, 16)
+    # Coarse heuristic: allow more if plenty free, otherwise tighten
+    if free_mb < 2000:   return 8
+    if free_mb < 4000:   return 12
+    if free_mb < 8000:   return 16
+    if free_mb < 12000:  return 20
+    if free_mb < 20000:  return 24
+    return min(32, default_batch)
+
+def _post_embeddings(payload_inputs: List[str], model: str, timeout: int, retries: int) -> List[List[float]]:
+    url = f"{LMSTUDIO_BASE.rstrip('/')}/v1/embeddings"
+    body = {"model": model, "input": payload_inputs}
+    backoff = EMB_RETRY_BACKOFF_S
+    for attempt in range(retries+1):
+        try:
+            r = requests.post(url, headers=HEADERS, json=body, timeout=timeout)
+            r.raise_for_status()
+            data = r.json()["data"]
+            return [d["embedding"] for d in data]
+        except Exception as e:
+            if attempt >= retries:
+                raise
+            time.sleep(backoff)
+            backoff *= 1.8
+    raise RuntimeError("unreachable")
+
+def embed_texts(texts: List[str], batch: Optional[int] = None, model: Optional[str] = None) -> np.ndarray:
+    """
+    Generic embedders (no cache). Still auto-batches & truncates.
+    """
+    model = model or LMSTUDIO_EMB
+    bsz = _choose_batch_size(EMB_AUTO_BATCH, batch if batch is not None else EMB_BATCH)
+    work: List[str] = [_truncate(t or "", EMB_MAX_CHARS_PER_DOC) for t in texts]
+    N = len(work)
+    out: List[List[float]] = []
+    t0 = time.time()
+    log.info(f"Embedding {N} texts | model={model} | batch={bsz} | max_chars={EMB_MAX_CHARS_PER_DOC}")
+    for i in range(0, N, bsz):
+        sub = work[i:i+bsz]
+        embs = _post_embeddings(sub, model=model, timeout=HTTP_TIMEOUT, retries=EMB_RETRY_MAX)
+        out.extend(embs)
+        if (i//bsz) % 5 == 0:
+            done = i+len(sub)
+            log.info(f"  progress {done}/{N} ({100.0*done/max(1,N):.1f}%)")
+    arr = np.array(out, dtype="float32")
+    # normalize
+    arr /= (np.linalg.norm(arr, axis=1, keepdims=True) + 1e-12)
+    log.info(f"Embedding done in {time.time()-t0:.1f}s")
+    return arr
+
+def embed_docs_with_cache(pmids: List[str], texts: List[str], model: Optional[str] = None) -> Tuple[np.ndarray, Dict[str,int]]:
+    """
+    pmids/texts aligned. Uses sqlite cache keyed by (pmid, model) + content hash.
+    Auto-batches requests and logs progress. Returns matrix in pmids order.
+    """
+    assert len(pmids) == len(texts)
+    model = model or LMSTUDIO_EMB
+    bsz = _choose_batch_size(EMB_AUTO_BATCH, EMB_BATCH)
+
+    # Precompute trunc, hash
+    trunc = [_truncate(t or "", EMB_MAX_CHARS_PER_DOC) for t in texts]
+    hashes = [VecDB.make_hash(model, t) for t in trunc]
+
+    db = VecDB()
+    have = db.get_many([(pmids[i], model) for i in range(len(pmids))])
+
+    # Decide which need (missing or hash changed)
+    to_do_idx: List[int] = []
+    cached_vecs: Dict[int, np.ndarray] = {}
+    need_hash_rows: List[Tuple[str,str]] = []
+    for i, p in enumerate(pmids):
+        key = (p, model)
+        if key in have:
+            h, dim, blob = have[key]
+            if h == hashes[i]:
+                cached_vecs[i] = VecDB.unpack_vec(blob, dim)
+            else:
+                to_do_idx.append(i)
+        else:
+            to_do_idx.append(i)
+
+    log.info(f"Embeddings cache: hit={len(cached_vecs)} | miss={len(to_do_idx)} | model={model} | batch={bsz}")
+
+    # Batch the misses
+    rows_for_db: List[Tuple[str,str,str,int,bytes]] = []
+    if to_do_idx:
+        N = len(to_do_idx)
+        t0 = time.time()
+        for s in range(0, N, bsz):
+            idxs = to_do_idx[s:s+bsz]
+            payload = [trunc[i] for i in idxs]
+            embs = _post_embeddings(payload, model=model, timeout=HTTP_TIMEOUT, retries=EMB_RETRY_MAX)
+            for j, i in enumerate(idxs):
+                vec = np.array(embs[j], dtype="float32")
+                vec /= (np.linalg.norm(vec) + 1e-12)
+                cached_vecs[i] = vec
+                rows_for_db.append((pmids[i], model, hashes[i], int(vec.size), VecDB.pack_vec(vec)))
+            if (s//bsz) % 5 == 0:
+                done = s + len(idxs)
+                log.info(f"  embed new {done}/{N} ({100.0*done/max(1,N):.1f}%)")
+        db.upsert_many(rows_for_db)
+        log.info(f"Embedded {N} new vecs in {time.time()-t0:.1f}s (cached saved to DB).")
+
+    # Assemble output in pmids order
+    dim = next(iter(cached_vecs.values())).size if cached_vecs else 0
+    mat = np.zeros((len(pmids), dim), dtype="float32")
+    for i, p in enumerate(pmids):
+        mat[i,:] = cached_vecs[i]
+    idx = {pmids[i]: i for i in range(len(pmids))}
+    return mat, idx
+
+
+
+###############################################################################
+### FILE: text/llm.py
+###############################################################################
+from __future__ import annotations
+import json, re, requests
+from typing import Optional
+from src.config.defaults import LMSTUDIO_BASE, LMSTUDIO_CHAT, HTTP_TIMEOUT, USER_AGENT
+
+HEADERS = {"Content-Type":"application/json","User-Agent":USER_AGENT}
+
+_FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9]*\s*|\s*```\s*$", re.M)
+
+def _strip_md_fences(s: str) -> str:
+    # remove ```json fences anywhere
+    return _FENCE_RE.sub("", s).strip()
+
+def _extract_json_block(text: str) -> str:
+    # grab the first {...} block greedily; fallback to [...] if needed
+    m = re.search(r"\{[\s\S]*\}", text)
+    if m: return m.group(0)
+    m = re.search(r"\[[\s\S]*\]", text)
+    if m: return m.group(0)
+    # if nothing obvious, assume whole text is meant to be JSON
+    return text.strip()
+
+def _quick_sanitize(js: str) -> str:
+    s = js
+    # normalize smart quotes → plain
+    s = s.replace("\u201c", '"').replace("\u201d", '"').replace("\u2018", "'").replace("\u2019", "'")
+    # remove trailing commas before } or ]
+    s = re.sub(r",\s*(\}|\])", r"\1", s)
+    # remove stray backticks just in case
+    s = s.replace("```", "")
+    return s
+
+def _repair_json_via_llm(bad: str) -> str:
+    url = f"{LMSTUDIO_BASE.rstrip('/')}/v1/chat/completions"
+    system = (
+        "You are a JSON fixer. Convert the given content into STRICT, VALID JSON.\n"
+        "Rules:\n"
+        "- Use only double quotes for keys and string values.\n"
+        "- Escape ALL internal double quotes inside string values (e.g., boolean query strings with phrases).\n"
+        "- Do NOT include markdown fences. No comments. No trailing commas.\n"
+        "- Keep the same keys/structure if present: picos, inclusion_criteria, exclusion_criteria, reason_taxonomy, boolean_queries.\n"
+        "Return JSON ONLY."
+    )
+    user = f"BAD_JSON:\n{bad}"
+    body = {
+        "model": LMSTUDIO_CHAT,
+        "messages": [{"role":"system","content":system},{"role":"user","content":user}],
+        "temperature": 0.0,
+        "max_tokens": 900,
+        "stream": False
+    }
+    r = requests.post(url, headers=HEADERS, json=body, timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    content = r.json()["choices"][0]["message"]["content"]
+    content = _strip_md_fences(content)
+    repaired = _extract_json_block(content)
+    repaired = _quick_sanitize(repaired)
+    return repaired
+
+def chat_json(system: str, user: str, temperature: float = 0.1, max_tokens: int = 700) -> dict:
+    url = f"{LMSTUDIO_BASE.rstrip('/')}/v1/chat/completions"
+    body = {
+        "model": LMSTUDIO_CHAT,
+        "messages": [{"role":"system","content":system},{"role":"user","content":user}],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False
+    }
+    r = requests.post(url, headers=HEADERS, json=body, timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    content = r.json()["choices"][0]["message"]["content"]
+
+    # 1) strip fences, 2) extract JSON-ish block, 3) sanitize, 4) parse
+    raw = _strip_md_fences(content)
+    js = _extract_json_block(raw)
+    js = _quick_sanitize(js)
+
+    try:
+        return json.loads(js)
+    except Exception:
+        # One repair attempt via LLM
+        try:
+            repaired = _repair_json_via_llm(js)
+            return json.loads(repaired)
+        except Exception as e:
+            # Print a short snippet to help debug
+            snippet = js[:500]
+            raise ValueError(f"Could not parse LLM JSON after repair. Snippet:\n{snippet}\nError: {e}")
+
+
+
+###############################################################################
+### FILE: text/prompts.py
+###############################################################################
+P0_SYSTEM = """
+You are configuring a PRISMA title/abstract screening. From the user's description and preferences,
+produce strict, machine-parseable criteria and PubMed boolean queries.
+
+Output requirements:
+- Return JSON ONLY (no code fences).
+- All strings must be valid JSON strings (escape inner double quotes in query strings).
+- Keys must include exactly:
+  picos (object with keys: population, intervention, comparison, outcomes (array of strings),
+         study_design (array of strings), year_min (int or null), languages (array of full language names)),
+  inclusion_criteria (object),
+  exclusion_criteria (object),
+  reason_taxonomy (array of enums from: ["design_mismatch","population_mismatch","intervention_mismatch","language","year","insufficient_info","off_topic"]),
+  boolean_queries (object of strings).
+
+Do not add any prose.
+"""
+
+
+def p0_user_prompt(intent_text: str) -> str:
+    return f"INTENT/PREFERENCES:\n{intent_text}\n\nProduce the JSON now."
+
+P1_SYSTEM = """
+You are a PRISMA title/abstract screener. Decide INCLUDE, EXCLUDE, or BORDERLINE strictly
+from CRITERIA_JSON and the record. Use pub_types only for design; never infer design from title words.
+Do NOT exclude solely because outcomes are not stated; mark BORDERLINE instead.
+Treat Signals as hints (not sufficient reasons).
+Return JSON ONLY matching schema:
+{ "pmid": "...", "decision": "include|exclude|borderline", "primary_reason": "...",
+  "confidence": 0.0, "evidence": { "population_quote": "...", "intervention_quote": "...",
+  "design_evidence": "pub_types: [...] or empty", "notes": "..." } }.
+"""
+
+
+

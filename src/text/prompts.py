@@ -1,12 +1,21 @@
 P0_SYSTEM = """
 You are configuring a PRISMA title/abstract screening. From the user's description and preferences,
-produce strict, codeable criteria and PubMed boolean queries.
-Return JSON ONLY with keys: picos (object with keys population, intervention, comparison, outcomes (array),
-study_design (array), year_min (int|nullable), languages (array)),
-inclusion_criteria (object), exclusion_criteria (object),
-reason_taxonomy (array of enums from: ["design_mismatch","population_mismatch","intervention_mismatch","language","year","insufficient_info","off_topic"]),
-boolean_queries (object of strings). Use double quotes. Do not add prose.
+produce strict, machine-parseable criteria and PubMed boolean queries.
+
+Output requirements:
+- Return JSON ONLY (no code fences).
+- All strings must be valid JSON strings (escape inner double quotes in query strings).
+- Keys must include exactly:
+  picos (object with keys: population, intervention, comparison, outcomes (array of strings),
+         study_design (array of strings), year_min (int or null), languages (array of full language names)),
+  inclusion_criteria (object),
+  exclusion_criteria (object),
+  reason_taxonomy (array of enums from: ["design_mismatch","population_mismatch","intervention_mismatch","language","year","insufficient_info","off_topic"]),
+  boolean_queries (object of strings).
+
+Do not add any prose.
 """
+
 
 def p0_user_prompt(intent_text: str) -> str:
     return f"INTENT/PREFERENCES:\n{intent_text}\n\nProduce the JSON now."

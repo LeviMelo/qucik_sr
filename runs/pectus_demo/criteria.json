@@ -1,0 +1,46 @@
+{
+  "picos": {
+    "population": "Adolescents+Adults",
+    "intervention": "Intercostal nerve cryoablation",
+    "comparison": "Thoracic epidural/Paravertebral/Standard care",
+    "outcomes": [
+      "LOS",
+      "Opioid",
+      "Pain",
+      "Neuropathic"
+    ],
+    "study_design": [
+      "RCT",
+      "Clinical trials",
+      "Cohort",
+      "Case-control",
+      "Observational"
+    ],
+    "year_min": 2000,
+    "languages": [
+      "English",
+      "Portuguese",
+      "Spanish"
+    ]
+  },
+  "inclusion_criteria": {},
+  "exclusion_criteria": {},
+  "reason_taxonomy": [
+    "design_mismatch",
+    "population_mismatch",
+    "intervention_mismatch",
+    "language",
+    "year",
+    "insufficient_info",
+    "off_topic"
+  ],
+  "boolean_queries": {
+    "population": "Adolescents OR Adult",
+    "intervention": "Intercostal nerve cryoablation",
+    "comparison": "Thoracic epidural OR Paravertebral OR Standard care",
+    "outcomes": "LOS OR Opioid OR Pain OR Neuropathic",
+    "study_design": "RCT OR Clinical trials OR Cohort OR Case-control OR Observational",
+    "language": "English OR Portuguese OR Spanish",
+    "year": "2000:2024"
+  }
+}
