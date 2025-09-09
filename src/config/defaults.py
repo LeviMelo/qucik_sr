@@ -16,6 +16,11 @@ ICITE_BASE       = os.getenv("ICITE_BASE", "https://icite.od.nih.gov/api/pubs")
 # ---- Retrieval ----
 ESEARCH_RETMAX_PER_QUERY = int(os.getenv("ESEARCH_RETMAX_PER_QUERY", "2000"))
 
+# ---- Retrieval curation knobs (hit-count band to keep a query) ----
+ESEARCH_KEEP_MIN = int(os.getenv("ESEARCH_KEEP_MIN", "2"))       # drop brittle (0–1) queries
+ESEARCH_KEEP_MAX = int(os.getenv("ESEARCH_KEEP_MAX", "50000"))   # quarantine gigantic queries
+QUERY_VARIANT_CAP = int(os.getenv("QUERY_VARIANT_CAP", "60"))    # cap auto-generated variants
+
 # ---- FS (define early; used by VEC_DB_PATH) ----
 DATA_DIR         = os.getenv("DATA_DIR", "data")
 RUNS_DIR         = os.getenv("RUNS_DIR", "runs")

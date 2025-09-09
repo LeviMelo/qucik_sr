@@ -19,6 +19,11 @@ from src.screen.regressor import OnlineRegressor, featurize_row
 from src.screen.llm_decide import llm_decide_batch
 from src.graph.cile import one_wave_expand
 from src.io.store import ensure_run_dir, write_json, write_tsv
+import re
+from itertools import combinations, product
+from src.config.defaults import (
+    ESEARCH_KEEP_MIN, ESEARCH_KEEP_MAX, QUERY_VARIANT_CAP,
+)
 
 logging.basicConfig(
     level=os.environ.get("LOGLEVEL", "INFO"),
@@ -36,33 +41,102 @@ def _empty_or_blank_queries(qdict: Dict[str, str] | None) -> bool:
             return False
     return True
 
-def _fallback_boolean_queries() -> Dict[str, str]:
+# ---------- NEW: generic query generation from PICOS (no MeSH, NL-friendly) ----------
+
+
+_STOP = {
+    "the","a","an","of","and","or","to","for","in","on","with","without","by","vs","versus",
+    "during","after","before","at","from","as","within","between","under","over",
+    "study","trial","randomized","randomised","cohort","case","control","observational",
+    "adult","adults","adolescent","adolescents","children","child","pediatric","paediatric"
+}
+
+def _split_phrases(text: str) -> list[str]:
+    if not text: return []
+    s = text.replace("/", " ").replace(";", " ").replace(",", " ").replace(":", " ").replace("(", " ").replace(")", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s.split()
+
+def _clean_tokens(words: list[str]) -> list[str]:
+    out = []
+    for w in words:
+        w = re.sub(r"[^A-Za-z0-9\-]+", "", w)
+        if not w: continue
+        wl = w.lower()
+        if wl in _STOP: continue
+        if len(wl) <= 2: continue
+        out.append(wl)
+    return out
+
+def _ngrams(tokens: list[str], n: int) -> list[str]:
+    return [" ".join(tokens[i:i+n]) for i in range(len(tokens)-n+1)]
+
+def _unique_keep_order(seq: list[str]) -> list[str]:
+    seen = set(); out = []
+    for x in seq:
+        if x and x not in seen:
+            seen.add(x); out.append(x)
+    return out
+
+def _extract_key_terms(picos) -> tuple[list[str], list[str]]:
     """
-    Conservative but targeted PubMed TA query for:
-    - Pectus excavatum / Nuss / MIRPE
-    - Intercostal cryoablation / cryoanalgesia / cryoneurolysis
-    - Humans + primary-ish designs
-    Year filter is applied via esearch(mindate=...), so not in the string.
+    From PICOS, pull P and I terms. We do not force MeSH or fields—keep it NL-friendly.
+    Strategy:
+      - tokenize population & intervention
+      - keep unigrams/bigrams/trigrams (longer phrases first)
+      - drop common stopwords
     """
-    ta_pectus = '("pectus excavatum"[Title/Abstract] OR Nuss[Title/Abstract] OR "minimally invasive repair"[Title/Abstract] OR MIRPE[Title/Abstract])'
-    ta_cryo   = '(cryoablat*[Title/Abstract] OR cryoanalges*[Title/Abstract] OR cryoneurolys*[Title/Abstract] OR (("intercostal nerve"[Title/Abstract]) AND cryo*[Title/Abstract]))'
-    humans    = 'Humans[MeSH Terms]'
-    designs   = '(' + ' OR '.join([
-        '"Randomized Controlled Trial"[Publication Type]',
-        '"Controlled Clinical Trial"[Publication Type]',
-        '"Clinical Trial"[Publication Type]',
-        '"Observational Study"[Publication Type]',
-        '"Cohort Studies"[MeSH Terms]',
-        '"Case-Control Studies"[MeSH Terms]',
-        '"Prospective Studies"[MeSH Terms]',
-    ]) + ')'
-    base = f'({ta_pectus}) AND ({ta_cryo}) AND {humans} AND {designs}'
-    # you can add a looser variant too if you want recall:
-    alt  = f'({ta_pectus}) AND cryo*[Title/Abstract] AND {humans}'
-    return {
-        "title_abstract_strict": base,
-        "title_abstract_loose": alt,
-    }
+    p_text = (picos.population or "") or ""
+    i_text = (picos.intervention or "") or ""
+    p_tok  = _clean_tokens(_split_phrases(p_text))
+    i_tok  = _clean_tokens(_split_phrases(i_text))
+
+    p_grams = _unique_keep_order(_ngrams(p_tok,3) + _ngrams(p_tok,2) + p_tok)
+    i_grams = _unique_keep_order(_ngrams(i_tok,3) + _ngrams(i_tok,2) + i_tok)
+
+    # favor longer phrases: sort by token count desc then alphabetically
+    p_grams.sort(key=lambda s: (-len(s.split()), s))
+    i_grams.sort(key=lambda s: (-len(s.split()), s))
+
+    # cap each side to avoid explosion; we still build many query variants below
+    return p_grams[:10], i_grams[:12]
+
+def _quote(t: str) -> str:
+    return f"\"{t}\"" if " " in t else t
+
+def _build_query_variants(p_terms: list[str], i_terms: list[str], cap: int) -> dict[str,str]:
+    """
+    Produce a *portfolio* of queries:
+      1) Natural-language “bag” (P + I).
+      2) Phrase-pairs (quoted) in AND.
+      3) OR-packs on each side (P) AND (I) with small rotations.
+    No field tags; let PubMed ATM expand freely. Dedup outputs.
+    """
+    variants: dict[str,str] = {}
+    def add(name: str, q: str):
+        if len(variants) < cap and q.strip():
+            variants[name] = q
+
+    # 1) NL bags (prefer top phrases)
+    bag1 = " ".join((_quote(x) for x in (p_terms[:2] + i_terms[:2])))
+    if bag1: add("nl_bag_1", bag1)
+    bag2 = " ".join((_quote(x) for x in (p_terms[:3] + i_terms[:3])))
+    if bag2: add("nl_bag_2", bag2)
+
+    # 2) Pairwise P-I AND combinations (limit)
+    for p, i in list(product(p_terms[:5], i_terms[:6]))[:20]:
+        add(f"pi_pair_{p}_{i}", f"{_quote(p)} AND {_quote(i)}")
+
+    # 3) OR-packs (small rotations)
+    def pack(xs: list[str], k: int) -> str:
+        xsq = [_quote(x) for x in xs[:k]]
+        return "(" + " OR ".join(xsq) + ")"
+    # a few sizes to diversify
+    for kP, kI in [(3,3),(4,4),(5,3)]:
+        add(f"pack_{kP}_{kI}", f"{pack(p_terms, kP)} AND {pack(i_terms, kI)}")
+
+    # 4) Minimal backoffs if still empty later (we’ll call generator again)
+    return variants
 
 
 app = typer.Typer(add_completion=False)
@@ -110,43 +184,72 @@ def run(prompt: str = typer.Argument(..., help="Topic intent / preferences parag
         # ---- 2) Retrieval ----
         log.info("Retrieval: esearch…")
 
-        # Guard: some LLM runs omit boolean_queries → use a robust fallback
-        if _empty_or_blank_queries(criteria.boolean_queries):
-            log.warning("P0 returned no usable boolean_queries; injecting deterministic fallback query.")
-            criteria.boolean_queries = _fallback_boolean_queries()
-            # persist the patched criteria so you can audit later
-            write_json(run_dir/"criteria.patched.json", criteria.model_dump())
+        # Harvest P0 queries (may be empty or brittle)
+        p0_q = dict(criteria.boolean_queries or {})
+        if not p0_q:
+            log.warning("P0 returned no boolean_queries.")
 
-        # Log summaries of the queries we will actually run
-        log.info(f"P0 boolean_queries count: {len(criteria.boolean_queries)}")
-        for name, q in criteria.boolean_queries.items():
+        # Always augment with generic P∧I variants
+        p_terms, i_terms = _extract_key_terms(criteria.picos)
+        auto_q = _build_query_variants(p_terms, i_terms, QUERY_VARIANT_CAP)
+
+        # Merge and probe everything
+        candidate_q = {**p0_q, **auto_q}
+
+        log.info(f"Candidate queries to probe: {len(candidate_q)}")
+        for name, q in candidate_q.items():
             snip = (q or "").strip().replace("\n", " ")
-            if len(snip) > 180:
-                snip = snip[:180] + " …"
+            if len(snip) > 160: snip = snip[:160] + " …"
             log.info(f"  {name}: {snip}")
 
-        pmid_set = set()
+        # Probe counts and keep a healthy band
+        from src.net.entrez import esearch, efetch_abstracts, esearch_count  # <-- use new helper
+
+        kept: dict[str,str] = {}
         q_stats = []
-        for name, q in criteria.boolean_queries.items():
-            if not q or not str(q).strip():
-                log.warning(f"Skipping empty boolean query: {name}")
+        total_expected = 0
+        for name, q in candidate_q.items():
+            try:
+                cnt = esearch_count(q, mindate=criteria.picos.year_min)
+            except Exception as e:
+                log.warning(f"esearch_count failed for {name}: {e}")
                 continue
+            q_stats.append({"name": name, "hits": cnt})
+            if cnt >= ESEARCH_KEEP_MIN and cnt <= ESEARCH_KEEP_MAX:
+                kept[name] = q
+                total_expected += cnt
+
+        # If nothing in band, try minimal backoffs (P top-1 & I top-1; and plain bag)
+        if not kept:
+            log.warning("No query fell in the keep band; trying minimal backoffs.")
+            if p_terms and i_terms:
+                kept["pi_min"] = f"{_quote(p_terms[0])} AND {_quote(i_terms[0])}"
+            bag_min = " ".join((_quote(x) for x in (p_terms[:1] + i_terms[:2])))
+            if bag_min:
+                kept["nl_min"] = bag_min
+
+        # Execute kept queries → union+dedupe
+        pmid_set = set()
+        for name, q in kept.items():
             try:
                 ids = esearch(q, retmax=ESEARCH_RETMAX_PER_QUERY, mindate=criteria.picos.year_min)
                 pmid_set.update(ids)
-                q_stats.append({"name": name, "hits": len(ids)})
             except Exception as e:
                 log.warning(f"esearch failed for {name}: {e}")
 
         pmids = list(pmid_set)
+        # Dev cap if requested
         if max_records and len(pmids) > max_records:
             pmids = pmids[:max_records]
             log.info(f"Dev cap: limiting to first {len(pmids)} records")
 
         log.info(f"Retrieval: efetch abstracts for {len(pmids)} PMIDs…")
         meta = efetch_abstracts(pmids, workers=3, use_cache=True)
+
         write_json(run_dir/"retrieval.json", {
-            "queries": criteria.boolean_queries,
+            "queries_from_llm": p0_q,
+            "queries_auto_generated": auto_q,
+            "queries_kept": kept,
             "query_stats": q_stats,
             "pmids": pmids,
             "hits": len(meta)
@@ -157,6 +260,7 @@ def run(prompt: str = typer.Argument(..., help="Topic intent / preferences parag
         if not docs:
             log.error("No records retrieved.")
             raise typer.Exit(code=1)
+
 
         # ---- 3) Embeddings & intent vector ----
         log.info(f"Embedding {len(docs)} documents…")
