@@ -1,5 +1,7 @@
+# src/config/defaults.py
 from __future__ import annotations
 import os
+import os.path as _p
 
 # ---- External services ----
 LMSTUDIO_BASE    = os.getenv("LMSTUDIO_BASE", "http://127.0.0.1:1234")
@@ -9,19 +11,17 @@ LMSTUDIO_CHAT    = os.getenv("LMSTUDIO_CHAT_MODEL", "gemma-3n-e2b-it")
 ENTREZ_EMAIL     = os.getenv("ENTREZ_EMAIL", "you@example.com")
 ENTREZ_API_KEY   = os.getenv("ENTREZ_API_KEY", "")
 HTTP_TIMEOUT     = int(os.getenv("HTTP_TIMEOUT", "30"))
-USER_AGENT       = os.getenv("USER_AGENT", "sr-screener/0.1 (+local)")
+USER_AGENT       = os.getenv("USER_AGENT", "sr-screener/0.2 (+local)")
 
 ICITE_BASE       = os.getenv("ICITE_BASE", "https://icite.od.nih.gov/api/pubs")
 
 # ---- Retrieval ----
 ESEARCH_RETMAX_PER_QUERY = int(os.getenv("ESEARCH_RETMAX_PER_QUERY", "2000"))
+QUERY_HIT_MIN            = int(os.getenv("QUERY_HIT_MIN", "5"))
+QUERY_HIT_MAX            = int(os.getenv("QUERY_HIT_MAX", "2500"))
+MAX_QUERY_VARIANTS       = int(os.getenv("MAX_QUERY_VARIANTS", "6"))  # keep it tight
 
-# ---- Retrieval curation knobs (hit-count band to keep a query) ----
-ESEARCH_KEEP_MIN = int(os.getenv("ESEARCH_KEEP_MIN", "2"))       # drop brittle (0–1) queries
-ESEARCH_KEEP_MAX = int(os.getenv("ESEARCH_KEEP_MAX", "50000"))   # quarantine gigantic queries
-QUERY_VARIANT_CAP = int(os.getenv("QUERY_VARIANT_CAP", "60"))    # cap auto-generated variants
-
-# ---- FS (define early; used by VEC_DB_PATH) ----
+# ---- FS ----
 DATA_DIR         = os.getenv("DATA_DIR", "data")
 RUNS_DIR         = os.getenv("RUNS_DIR", "runs")
 
@@ -35,7 +35,7 @@ EMB_RETRY_BACKOFF_S   = float(os.getenv("EMB_RETRY_BACKOFF_S", "1.2"))
 EMB_RETRY_MAX         = int(os.getenv("EMB_RETRY_MAX", "4"))
 
 # ---- Vector DB (sqlite) ----
-VEC_DB_PATH      = os.getenv("VEC_DB_PATH", os.path.join(DATA_DIR, "cache", "vectors.sqlite3"))
+VEC_DB_PATH      = os.getenv("VEC_DB_PATH", _p.join(DATA_DIR, "cache", "vectors.sqlite3"))
 
 # ---- Seeds & thresholds ----
 SEED_SEM_TAU_HI  = float(os.getenv("SEED_SEM_TAU_HI", "0.92"))
@@ -58,8 +58,4 @@ LLM_BUDGET       = int(os.getenv("LLM_BUDGET", "150"))
 
 # ---- Languages & year defaults ----
 DEFAULT_LANGS    = os.getenv("DEFAULT_LANGS", "English,Portuguese,Spanish").split(",")
-DEFAULT_YEAR_MIN = int(os.getenv("DEFAULT_YEAR_MIN", "2000"))
-
-# ---- FS ----
-DATA_DIR         = os.getenv("DATA_DIR", "data")
-RUNS_DIR         = os.getenv("RUNS_DIR", "runs")
+DEFAULT_YEAR_MIN = int(os.getenv("DEFAULT_YEAR_MIN", "2015"))

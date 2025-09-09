@@ -1,9 +1,20 @@
 {
-  "records_screened": 300,
-  "included": 0,
-  "excluded": 300,
-  "borderline": 0,
+  "records_screened": 65,
+  "included": 53,
+  "excluded": 2,
+  "borderline": 10,
   "exclusions_by_reason": {
-    "language": 300
+    "off_topic": 54,
+    "insufficient_info": 5,
+    "population_mismatch": 2,
+    "language": 1,
+    "intervention_mismatch": 1,
+    "design_mismatch": 2
+  },
+  "by_topic_relevance": {
+    "primary_rct": 44,
+    "adjacent_meta_analysis": 14,
+    "adjacent_review": 3,
+    "off_topic": 4
   }
 }

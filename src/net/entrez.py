@@ -1,52 +1,38 @@
 from __future__ import annotations
-import requests, re, time, math, concurrent.futures, xml.etree.ElementTree as ET
-from typing import List, Dict, Any, Iterable, Optional, Tuple
+import requests, re, time, concurrent.futures, xml.etree.ElementTree as ET
+from typing import List, Dict, Any, Iterable, Optional
 import logging
 from src.config.defaults import ENTREZ_EMAIL, ENTREZ_API_KEY, HTTP_TIMEOUT, USER_AGENT
-from src.io.docdb import DocDB
 
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 log = logging.getLogger("entrez")
 
-# add near top of file (after imports)
 _LANG_MAP = {
     "eng": "English", "en": "English", "english": "English",
     "spa": "Spanish", "es": "Spanish", "spanish": "Spanish",
     "por": "Portuguese", "pt": "Portuguese", "portuguese": "Portuguese",
     "fra": "French", "fre": "French", "fr": "French", "french": "French",
-    "ger": "German", "deu": "German", "de": "German", "german": "German",
-    # extend as needed
+    "deu": "German", "ger":"German", "de": "German", "german": "German",
 }
 
 def _norm_lang_name(s: str | None) -> str | None:
-    if not s:
-        return None
+    if not s: return None
     key = s.strip().lower()
     return _LANG_MAP.get(key, s)
 
-def esearch(query: str, db: str = "pubmed", retmax: int = 10000, mindate: Optional[int]=None, maxdate: Optional[int]=None, sort: str="date") -> List[str]:
+def esearch(query: str, db: str = "pubmed", retmax: int = 10000, mindate: Optional[int]=None, maxdate: Optional[int]=None, sort: str="date") -> Dict[str, Any]:
     params = {"db": db, "term": query, "retmode": "json", "retmax": retmax, "sort": sort, "email": ENTREZ_EMAIL}
     if ENTREZ_API_KEY: params["api_key"] = ENTREZ_API_KEY
     if mindate: params["mindate"] = str(mindate)
     if maxdate: params["maxdate"] = str(maxdate)
     r = requests.get(f"{EUTILS}/esearch.fcgi", headers=HEADERS, params=params, timeout=HTTP_TIMEOUT)
     r.raise_for_status()
-    return r.json().get("esearchresult", {}).get("idlist", [])
-
-# --- NEW: add a light esearch_count probe ------------------------------
-def esearch_count(query: str, db: str = "pubmed", mindate: Optional[int]=None, maxdate: Optional[int]=None) -> int:
-    """
-    Return only the total hit count for a query (fast probe).
-    """
-    params = {"db": db, "term": query, "retmode": "json", "retmax": 0, "email": ENTREZ_EMAIL}
-    if ENTREZ_API_KEY: params["api_key"] = ENTREZ_API_KEY
-    if mindate: params["mindate"] = str(mindate)
-    if maxdate: params["maxdate"] = str(maxdate)
-    r = requests.get(f"{EUTILS}/esearch.fcgi", headers=HEADERS, params=params, timeout=HTTP_TIMEOUT)
-    r.raise_for_status()
-    return int(r.json().get("esearchresult", {}).get("count", "0"))
-
+    js = r.json().get("esearchresult", {})
+    ids = js.get("idlist", [])
+    count = int(js.get("count", "0"))
+    translation = js.get("querytranslation") or ""
+    return {"ids": ids, "count": count, "translation": translation}
 
 def _parse_pubmed_xml(xml_text: str) -> Dict[str, Dict[str,Any]]:
     out: Dict[str,Dict[str,Any]] = {}
@@ -86,59 +72,17 @@ def _efetch_chunk(chunk: List[str]) -> Dict[str, Dict[str,Any]]:
     return _parse_pubmed_xml(r.text)
 
 def efetch_abstracts(pmids: Iterable[str], chunk_size: int = 200, workers: int = 3, use_cache: bool = True) -> Dict[str, Dict[str,Any]]:
-    """Polite parallel efetch with caching + progress logs."""
-    pmids = [str(p) for p in pmids]
+    pmids = [str(p) for p in pmids if p]
     if not pmids: return {}
-
-    cache = DocDB() if use_cache else None
-    have: Dict[str,Dict[str,Any]] = {}
-    todo = pmids
-
-    if cache:
-        cached = cache.get_many(pmids)
-        if cached:
-            for k, v in cached.items():
-                have[k] = v
-            todo = [p for p in pmids if p not in cached]
-
-    log.info(f"efetch: total={len(pmids)} (cache hit={len(have)}, miss={len(todo)}), chunk={chunk_size}, workers={workers}")
-
-    if not todo:
-        return have
-
-    chunks = [todo[i:i+chunk_size] for i in range(0, len(todo), chunk_size)]
-    # Courtesy: limit concurrency; add slight pacing between submissions to avoid burst.
     results: Dict[str,Dict[str,Any]] = {}
-    submitted = 0
-    t0 = time.monotonic()
-
+    # simple polite parallel fetch
+    chunks = [pmids[i:i+chunk_size] for i in range(0, len(pmids), chunk_size)]
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = []
-        for ch in chunks:
-            futs.append(ex.submit(_efetch_chunk, ch))
-            submitted += 1
-            time.sleep(0.10)  # tiny stagger
-
-        done = 0
+        futs = [ex.submit(_efetch_chunk, ch) for ch in chunks]
         for fut in concurrent.futures.as_completed(futs):
             try:
-                part = fut.result()
-                results.update(part)
+                results.update(fut.result())
             except Exception as e:
                 log.warning(f"efetch chunk failed: {e}")
-            done += 1
-            if done % 3 == 0 or done == len(chunks):
-                dt = time.monotonic() - t0
-                log.info(f"efetch progress {done}/{len(chunks)} chunks | items={sum(len(c) for c in chunks[:done])}/{len(todo)} | {dt:.1f}s")
-
-            # polite global pacing (aim ~3-5 req/s overall)
-            time.sleep(0.05)
-
-    # merge + persist
-    have.update(results)
-    if cache and results:
-        cache.put_many(results)
-
-    return have
-
-
+            time.sleep(0.08)
+    return results

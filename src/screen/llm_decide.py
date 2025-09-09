@@ -1,8 +1,7 @@
-# src/screen/llm_decide.py
 from __future__ import annotations
 from typing import List, Dict, Any
 import math
-from src.config.schema import Criteria, Document, DecisionLLM
+from src.config.schema import Criteria, Document, DecisionLLM, TopicRelevance
 from src.text.llm import chat_json
 from src.text.prompts import P1_SYSTEM
 from src.screen.features import signal_card
@@ -12,7 +11,12 @@ _ALLOWED = {
     "language","year","insufficient_info","off_topic"
 }
 
-# JSON Schema LM Studio can enforce (strict)
+_TOPIC = {
+    "primary_rct","primary_observational",
+    "adjacent_meta_analysis","adjacent_review","adjacent_guideline","adjacent_case_report",
+    "background","off_topic","unknown"
+}
+
 DECISION_SCHEMA: Dict[str, Any] = {
     "name": "decision",
     "schema": {
@@ -23,6 +27,7 @@ DECISION_SCHEMA: Dict[str, Any] = {
             "decision": {"type": "string", "enum": ["include","exclude","borderline"]},
             "primary_reason": {"type": "string", "enum": sorted(list(_ALLOWED))},
             "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "topic_relevance": {"type": "string", "enum": sorted(list(_TOPIC))},
             "evidence": {
                 "type": "object",
                 "additionalProperties": False,
@@ -35,7 +40,7 @@ DECISION_SCHEMA: Dict[str, Any] = {
                 "required": ["population_quote","intervention_quote","design_evidence","notes"]
             }
         },
-        "required": ["pmid","decision","primary_reason","confidence","evidence"]
+        "required": ["pmid","decision","primary_reason","confidence","topic_relevance","evidence"]
     }
 }
 
@@ -48,14 +53,13 @@ def _canonical_reason(txt: str) -> str:
     t = _norm_str(txt).lower()
     if t in _ALLOWED:
         return t
-    # heuristic mapping from free-text to our enums
-    if any(k in t for k in ["observational", "cohort", "case-control", "registry", "review", "meta-"]):
+    if any(k in t for k in ["observational", "cohort", "case-control", "registry"]):
         return "design_mismatch"
-    if any(k in t for k in ["randomized", "rct", "trial design mismatch", "not randomized"]):
+    if any(k in t for k in ["randomized", "rct"]):
         return "design_mismatch"
-    if any(k in t for k in ["population", "pediatric", "child", "children", "adult", "adolescent", "mismatch pop"]):
+    if any(k in t for k in ["population", "pediatric", "child", "children", "adult", "adolescent"]):
         return "population_mismatch"
-    if any(k in t for k in ["intervention", "wrong treatment", "not cryoablation", "different procedure"]):
+    if any(k in t for k in ["intervention", "cryo", "neurolys", "nerve"]):
         return "intervention_mismatch"
     if "language" in t:
         return "language"
@@ -65,8 +69,23 @@ def _canonical_reason(txt: str) -> str:
         return "insufficient_info"
     if any(k in t for k in ["off-topic", "not relevant", "unrelated", "irrelevant"]):
         return "off_topic"
-    # default bucket
     return "off_topic"
+
+def _canonical_topic(txt: str) -> TopicRelevance:
+    t = _norm_str(txt).lower()
+    for k in _TOPIC:
+        if t == k:
+            return k  # type: ignore
+    # light heuristics
+    if "meta" in t or "systematic" in t: return "adjacent_meta_analysis"  # type: ignore
+    if "review" in t: return "adjacent_review"  # type: ignore
+    if "guideline" in t: return "adjacent_guideline"  # type: ignore
+    if "case report" in t: return "adjacent_case_report"  # type: ignore
+    if "rct" in t or "random" in t: return "primary_rct"  # type: ignore
+    if "observational" in t or "cohort" in t or "case-control" in t: return "primary_observational"  # type: ignore
+    if "off" in t: return "off_topic"  # type: ignore
+    if "background" in t: return "background"  # type: ignore
+    return "unknown"  # type: ignore
 
 def _normalize_evidence(e: Any) -> Dict[str,str]:
     if not isinstance(e, dict): e = {}
@@ -81,18 +100,17 @@ def _coerce_decision(js: Dict[str, Any]) -> DecisionLLM:
     pmid = _norm_str(js.get("pmid", ""))
     decision = _norm_str(js.get("decision", "")).lower()
     if decision not in {"include","exclude","borderline"}:
-        # weak fallback
         decision = "borderline"
     reason = _canonical_reason(js.get("primary_reason",""))
-    # keep in [0,1]
     try:
         conf = float(js.get("confidence", 0.5))
         if not math.isfinite(conf): conf = 0.5
     except Exception:
         conf = 0.5
     conf = max(0.0, min(1.0, conf))
+    topic = _canonical_topic(js.get("topic_relevance","unknown"))
     ev = _normalize_evidence(js.get("evidence", {}))
-    return DecisionLLM(pmid=pmid, decision=decision, primary_reason=reason, confidence=conf, evidence=ev)
+    return DecisionLLM(pmid=pmid, decision=decision, primary_reason=reason, confidence=conf, topic_relevance=topic, evidence=ev)
 
 def llm_decide_batch(criteria: Criteria, docs: List[Document], signals_map: dict, temperature: float = 0.1) -> List[DecisionLLM]:
     out: List[DecisionLLM] = []
@@ -104,15 +122,9 @@ def llm_decide_batch(criteria: Criteria, docs: List[Document], signals_map: dict
             f"{signal_card(sig)}\n"
             "Return the JSON now."
         )
-        # 1) Try with schema (strict)
         try:
-            raw = chat_json(P1_SYSTEM, user, temperature=temperature, max_tokens=600, schema=DECISION_SCHEMA)
-            out.append(_coerce_decision(raw))
-            continue
+            raw = chat_json(P1_SYSTEM, user, temperature=temperature, max_tokens=700, schema=DECISION_SCHEMA)
         except Exception:
-            pass
-
-        # 2) Fall back to plain JSON with retries/repair inside chat_json
-        raw = chat_json(P1_SYSTEM, user, temperature=0.0, max_tokens=600, schema=None)
+            raw = chat_json(P1_SYSTEM, user, temperature=0.0, max_tokens=700, schema=None)
         out.append(_coerce_decision(raw))
     return out

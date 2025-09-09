@@ -1,7 +1,7 @@
 {
-  "H_prev": 0,
-  "neighborhood": 0,
-  "candidates": 0,
+  "H_prev": 8,
+  "neighborhood": 367,
+  "candidates": 359,
   "accepted": 0,
   "sum_ext_after": 0
 }

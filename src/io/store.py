@@ -1,6 +1,7 @@
 from __future__ import annotations
-import os, pathlib, json, csv
+import pathlib, json, csv
 from typing import Any, List, Dict
+
 from src.config.defaults import RUNS_DIR
 
 def ensure_run_dir(out_dir: str) -> pathlib.Path:
@@ -9,12 +10,22 @@ def ensure_run_dir(out_dir: str) -> pathlib.Path:
     return p
 
 def write_json(path: pathlib.Path, obj: Any):
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 def write_tsv(path: pathlib.Path, rows: List[Dict[str,Any]], fieldnames: List[str]):
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, delimiter="\t", fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+def write_csv(path: pathlib.Path, rows: List[Dict[str,Any]], fieldnames: List[str]):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         for r in rows:
             w.writerow(r)

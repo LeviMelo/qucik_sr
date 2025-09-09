@@ -1,8 +1,8 @@
 {
   "picos": {
-    "population": "adolescents+adults",
+    "population": "pectus excavatum OR Nuss procedure",
     "intervention": "intercostal nerve cryoablation",
-    "comparison": "thoracic epidural/paravertebral/standard care",
+    "comparison": null,
     "outcomes": [
       "LOS",
       "opioid",
@@ -16,7 +16,7 @@
       "case-control",
       "observational"
     ],
-    "year_min": 2000,
+    "year_min": 2015,
     "languages": [
       "English",
       "Portuguese",
@@ -25,16 +25,6 @@
   },
   "inclusion_criteria": {},
   "exclusion_criteria": {},
-  "reason_taxonomy": [
-    "design_mismatch",
-    "population_mismatch",
-    "intervention_mismatch",
-    "language",
-    "year",
-    "insufficient_info",
-    "off_topic"
-  ],
-  "boolean_queries": {
-    "title_abstract": "((ischemic pain OR chest pain) AND (pectus excavatum OR sunken chest)) AND (intercostal nerve cryoablation OR cryoablation) AND (adolescent OR adult) AND (RCT OR clinical trials OR cohort OR case-control OR observational) AND (thoracic epidural OR paravertebral OR standard care) AND (LOS OR opioid OR pain OR neuropathic) AND (language:EN OR language:PT OR language:ES) AND (year:2000:2024)"
-  }
+  "reason_taxonomy": [],
+  "boolean_queries": {}
 }

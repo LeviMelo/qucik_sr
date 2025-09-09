@@ -1,17 +1,16 @@
-# src/text/llm.py
 from __future__ import annotations
-import json, re, requests, time
+import json, re, requests
 from typing import Optional, Dict, Any
 from src.config.defaults import LMSTUDIO_BASE, LMSTUDIO_CHAT, HTTP_TIMEOUT, USER_AGENT
 
-HEADERS = {"Content-Type":"application/json","User-Agent":USER_AGENT}
-
+HEADERS = {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": USER_AGENT}
 _FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9]*\s*|\s*```\s*$", re.M)
 
 def _strip_md_fences(s: str) -> str:
     return _FENCE_RE.sub("", s).strip()
 
 def _extract_json_block(text: str) -> str:
+    # Prefer object; fallback to array; else raw
     m = re.search(r"\{[\s\S]*\}", text)
     if m: return m.group(0)
     m = re.search(r"\[[\s\S]*\]", text)
@@ -20,8 +19,11 @@ def _extract_json_block(text: str) -> str:
 
 def _quick_sanitize(js: str) -> str:
     s = js
+    # smart quotes → ascii
     s = s.replace("\u201c", '"').replace("\u201d", '"').replace("\u2018", "'").replace("\u2019", "'")
+    # trailing commas
     s = re.sub(r",\s*(\}|\])", r"\1", s)
+    # strip fenced code if any sneaks in
     s = s.replace("```", "")
     return s
 
@@ -29,35 +31,11 @@ def _post_chat(body: dict) -> str:
     url = f"{LMSTUDIO_BASE.rstrip('/')}/v1/chat/completions"
     r = requests.post(url, headers=HEADERS, json=body, timeout=HTTP_TIMEOUT)
     r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
-
-def _repair_json_via_llm(bad: str) -> str:
-    # Last-ditch fixer: rewrite as strict JSON
-    system = (
-        "You are a JSON fixer. Convert the given content into STRICT, VALID JSON.\n"
-        "Rules:\n"
-        "- Use only double-quoted keys and values.\n"
-        "- Escape internal quotes inside strings.\n"
-        "- No markdown, no comments, no trailing commas.\n"
-        "- Keep existing keys if present.\n"
-        "Return JSON ONLY."
-    )
-    body = {
-        "model": LMSTUDIO_CHAT,
-        "messages": [{"role":"system","content":system},{"role":"user","content":bad}],
-        "temperature": 0.0,
-        "max_tokens": 900,
-        "stream": False
-    }
-    content = _post_chat(body)
-    content = _strip_md_fences(content)
-    repaired = _extract_json_block(content)
-    repaired = _quick_sanitize(repaired)
-    return repaired
+    js = r.json()
+    # LM Studio returns {"choices":[{"message":{"content": ...}}]}
+    return js["choices"][0]["message"]["content"]
 
 def _mk_schema_response_format(schema: dict) -> dict:
-    # LM Studio supports JSON Schema with strict mode
-    # https://lmstudio.ai/docs/guides/structured-output
     return {
         "type": "json_schema",
         "json_schema": {
@@ -67,86 +45,49 @@ def _mk_schema_response_format(schema: dict) -> dict:
         }
     }
 
+def _try_request(messages, temperature, max_tokens, response_format: Optional[dict]) -> str:
+    body = {
+        "model": LMSTUDIO_CHAT,
+        "messages": messages,
+        "temperature": float(temperature),
+        "max_tokens": int(max_tokens),
+        "stream": False,
+    }
+    if response_format is not None:
+        body["response_format"] = response_format
+    return _post_chat(body)
+
 def chat_json(
     system: str,
     user: str,
     temperature: float = 0.1,
-    max_tokens: int = 700,
+    max_tokens: int = 900,
     schema: Optional[dict] = None,
-    retries: int = 2
 ) -> dict:
     """
-    Try 1: JSON Schema (strict) if provided.
-    Try 2: response_format=json_object (plain JSON mode).
-    Try 3: re-ask with stricter system "JSON ONLY".
-    Try 4: string-repair via fixer LLM.
+    Robust JSON chat:
+      1) If schema provided, try once WITH response_format=json_schema.
+      2) If that 4xx/5xx or parse fails, retry WITHOUT response_format (plain).
+      3) If still not JSON, try to extract and sanitize braces.
+      4) If all fails, raise a clear Exception.
     """
-    # --- Attempt 1: schema (if provided)
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+    # Attempt A: schema format (some LM Studio builds support this)
     if schema is not None:
-        body = {
-            "model": LMSTUDIO_CHAT,
-            "messages": [{"role":"system","content":system},{"role":"user","content":user}],
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": False,
-            "response_format": _mk_schema_response_format(schema),
-        }
         try:
-            content = _post_chat(body)
+            content = _try_request(messages, temperature, max_tokens, response_format=_mk_schema_response_format(schema))
             raw = _quick_sanitize(_extract_json_block(_strip_md_fences(content)))
             return json.loads(raw)
         except Exception:
-            # fall through to next attempts
+            # fallthrough to plain mode
             pass
 
-    # --- Attempt 2: json_object mode
-    body2 = {
-        "model": LMSTUDIO_CHAT,
-        "messages": [{"role":"system","content":system},{"role":"user","content":user}],
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "stream": False,
-        "response_format": {"type": "json_object"}  # usually supported; if not, server ignores
-    }
+    # Attempt B: plain request (no response_format at all)
     try:
-        content = _post_chat(body2)
+        content = _try_request(messages, temperature, max_tokens, response_format=None)
         raw = _quick_sanitize(_extract_json_block(_strip_md_fences(content)))
         return json.loads(raw)
-    except Exception:
-        pass
-
-    # --- Attempt 3: re-ask with an ultra-strict system prompt
-    strict_system = (
-        "Return STRICT JSON only. No prose. No markdown. No trailing commas. "
-        "If an enum is requested, ONLY use one of the allowed values."
-    )
-    body3 = {
-        "model": LMSTUDIO_CHAT,
-        "messages": [
-            {"role":"system","content":strict_system + "\n\n" + system},
-            {"role":"user","content":user}
-        ],
-        "temperature": 0.0,
-        "max_tokens": max_tokens,
-        "stream": False
-    }
-    try:
-        content = _post_chat(body3)
-        raw = _quick_sanitize(_extract_json_block(_strip_md_fences(content)))
-        return json.loads(raw)
-    except Exception:
-        pass
-
-    # --- Attempt 4: repair whatever we got from attempt 2/3 if any, else from the user prompt echo
-    # Re-run the best-effort request once and try repair
-    try:
-        content = _post_chat(body2)
-    except Exception:
-        content = _post_chat(body3)
-
-    raw = _quick_sanitize(_extract_json_block(_strip_md_fences(content)))
-    try:
-        return json.loads(raw)
-    except Exception:
-        repaired = _repair_json_via_llm(raw)
-        return json.loads(repaired)
+    except Exception as e:
+        # We tried; produce an actionable error with the best we can show
+        raise RuntimeError(f"chat_json failed to parse JSON from LM Studio response: {e}")

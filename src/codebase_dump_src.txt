@@ -58,84 +58,321 @@ Project structure for '/c/Users/Galaxy/LEVI/projects/Python/qucik_sr/src':
 ###############################################################################
 ### FILE: cli/main.py
 ###############################################################################
-def _fallback_boolean_queries(level: str = "strict") -> Dict[str, str]:
-    """
-    Deterministic query packs for pectus excavatum (Nuss/MIRPE) + intercostal cryo*.
-    `level` controls how aggressive we filter inside PubMed; we prefer recall, then
-    let downstream gates prune by design/year/language.
+from __future__ import annotations
+import argparse, logging, time, re
+from typing import Dict, List, Tuple
+from collections import defaultdict
 
-    Levels:
-      - "strict": TA-constrained, includes intercostal + cryo synonyms, no design filters.
-      - "medium": relax TA constraints on the cryo block; keep pectus TA.
-      - "loose": drop human/age, keep pectus+cryo core.
+from src.config.defaults import (
+    DEFAULT_LANGS, DEFAULT_YEAR_MIN, ESEARCH_RETMAX_PER_QUERY,
+)
+from src.config.schema import Criteria, PICOS, Document, LedgerRow
+from src.io.store import ensure_run_dir, write_json, write_tsv, write_csv
+from src.net.entrez import esearch, efetch_abstracts
+from src.text.prompts import P0_SYSTEM, p0_user_prompt
+from src.text.llm import chat_json
+from src.text.embed import embed_texts
+from src.screen.features import build_embeddings, compute_signals
+from src.screen.gates import objective_gate
+from src.screen.regressor import OnlineRegressor, featurize_row
+from src.screen.llm_decide import llm_decide_batch
+from src.prisma.counts import prisma_counts
 
-    Year filter is applied in esearch via mindate (not embedded in the string).
-    """
-    # Pectus / Nuss / MIRPE synonyms
-    pectus = '(' + ' OR '.join([
-        '"pectus excavatum"[Title/Abstract]',
-        '"funnel chest"[Title/Abstract]',
-        '"Nuss procedure"[Title/Abstract]',
-        'Nuss[Title/Abstract]',
-        '"minimally invasive repair"[Title/Abstract]',
-        'MIRPE[Title/Abstract]'
-    ]) + ')'
+log = logging.getLogger("cli")
+logging.basicConfig(
+    level="INFO",
+    format="%(asctime)s | %(levelname)s | %(name)s: %(message)s",
+    datefmt="%H:%M:%S"
+)
 
-    # Intercostal + cryo synonyms
-    intercostal = '(' + ' OR '.join([
-        '"intercostal nerve"[Title/Abstract]',
-        '"intercostal nerves"[Title/Abstract]'
-    ]) + ')'
+# --- Heuristic PICOS parse if P0 fails (just enough to keep the run alive) ---
+def _naive_picos_from_prompt(prompt: str, langs: List[str], year_min: int) -> PICOS:
+    p = "pectus excavatum OR Nuss procedure"
+    # crude intervention detection
+    itv = "intercostal nerve cryoablation"
+    if re.search(r"\bcryo", prompt, re.I) and re.search(r"\bintercostal", prompt, re.I):
+        itv = "intercostal nerve cryoablation"
+    elif re.search(r"\bcryo", prompt, re.I):
+        itv = "cryoablation"
+    outcomes = ["LOS","opioid","pain","neuropathic"]
+    study_design = ["RCT","clinical trials","cohort","case-control","observational"]
+    return PICOS(
+        population=p,
+        intervention=itv,
+        comparison=None,
+        outcomes=outcomes,
+        study_design=study_design,
+        year_min=year_min,
+        languages=langs or DEFAULT_LANGS
+    )
 
-    cryo = '(' + ' OR '.join([
-        'cryoablat*[Title/Abstract]',
-        'cryoanalges*[Title/Abstract]',
-        'cryoneurolys*[Title/Abstract]',
-        '"cryo-analges*"[Title/Abstract]',
-        '"cryo-neurolys*"[Title/Abstract]'
-    ]) + ')'
+def _fallback_pi_queries(criteria: Criteria) -> Dict[str, str]:
+    pop = criteria.picos.population.strip() if criteria.picos.population else ""
+    itv = criteria.picos.intervention.strip() if criteria.picos.intervention else ""
+    q = {}
+    if pop and itv:
+        q["pi_nl"] = f"\"{pop}\" \"{itv}\""
+        q["pi_and"] = f"({pop}) AND ({itv})"
+    elif itv:
+        q["i_only"] = f"\"{itv}\""
+    elif pop:
+        q["p_only"] = f"\"{pop}\""
+    return q
 
-    # Humans/age hints (not hard filters if we need recall)
-    humans_age = '(' + ' OR '.join([
-        'Humans[MeSH Terms]',
-        'adolescent[MeSH Terms]',
-        'adult[MeSH Terms]',
-        'adolescent[Title/Abstract]',
-        'adult[Title/Abstract]'
-    ]) + ')'
+def _p0_or_fallback(prompt: str, languages: List[str], year_min: int) -> Criteria:
+    # Try P0 once; on error, synthesize a minimal Criteria so the run can proceed.
+    try:
+        log.info("Phase P0: generating criteria via LLM…")
+        p0 = chat_json(P0_SYSTEM, p0_user_prompt(prompt), temperature=0.0, max_tokens=1200, schema=None)
+        crit = Criteria.model_validate(p0)
+    except Exception as e:
+        log.warning(f"P0 LLM failed ({e}); using heuristic PI fallback.")
+        picos = _naive_picos_from_prompt(prompt, languages or DEFAULT_LANGS, year_min or DEFAULT_YEAR_MIN)
+        crit = Criteria(
+            picos=picos,
+            inclusion_criteria={},
+            exclusion_criteria={},
+            reason_taxonomy=[],
+            boolean_queries={}
+        )
+    # apply CLI overrides
+    if languages:
+        crit.picos.languages = languages
+    if year_min:
+        crit.picos.year_min = year_min
+    if not crit.picos.year_min:
+        crit.picos.year_min = DEFAULT_YEAR_MIN
+    log.info("Phase P0 done")
+    return crit
 
-    # Packs
-    if level == "strict":
-        return {
-            # title/abstract on both sides; this is usually enough and precise
-            "ta_strict": f'({pectus}) AND ({intercostal}) AND ({cryo}) AND {humans_age}',
-            # variant that allows “cryo*” without explicit intercostal mention
-            "ta_strict_no_intercostal": f'({pectus}) AND (cryo*[Title/Abstract]) AND {humans_age}',
-        }
+def run(prompt: str,
+        languages: List[str] | None,
+        year_min: int | None,
+        out_dir: str,
+        max_records: int):
 
-    if level == "medium":
-        return {
-            # allow intercostal in any field; keep pectus in TA
-            "ta_medium": f'({pectus}) AND (("intercostal nerve"[All Fields] OR "intercostal nerves"[All Fields]) AND cryo*[All Fields])',
-            # allow cryo synonyms anywhere + pectus TA
-            "ta_medium_cryo_wide": f'({pectus}) AND (cryoablat*[All Fields] OR cryoanalges*[All Fields] OR cryoneurolys*[All Fields])',
-        }
+    t0 = time.time()
+    outp = ensure_run_dir(out_dir)
 
-    # "loose"
-    return {
-        # keep core: pectus + cryo*; drop humans/age completely
-        "ta_loose_core": f'({pectus}) AND (cryo*[All Fields])',
-        # broad “Nuss AND cryo” anywhere
-        "nuss_cryo_any": '(Nuss[All Fields] AND cryo*[All Fields])',
-    }
+    # ---------- P0 (robust) ----------
+    crit = _p0_or_fallback(prompt, languages or DEFAULT_LANGS, year_min or DEFAULT_YEAR_MIN)
+    write_json(outp / "criteria.json", crit.model_dump())
+
+    # ---------- Retrieval ----------
+    log.info("Retrieval: esearch…")
+    queries: Dict[str, str] = dict(crit.boolean_queries or {})
+    if not queries:
+        log.warning("P0 produced no boolean_queries. Using PI fallback queries.")
+        queries = _fallback_pi_queries(crit)
+
+    per_query_hits: List[Dict[str, int]] = []
+    per_query_trans: Dict[str, str] = {}
+    all_pmids: List[str] = []
+    for name, q in queries.items():
+        rs = esearch(q, retmax=ESEARCH_RETMAX_PER_QUERY, mindate=crit.picos.year_min or DEFAULT_YEAR_MIN)
+        per_query_trans[name] = rs.get("translation","")
+        ids = rs["ids"]
+        per_query_hits.append({"name": name, "hits": len(ids)})
+        all_pmids.extend(ids)
+
+    # Union, cap, fetch
+    seen = set()
+    pmids = []
+    for p in all_pmids:
+        if p not in seen:
+            pmids.append(p); seen.add(p)
+        if len(pmids) >= max_records:
+            log.info(f"Dev cap: limiting to first {max_records} records")
+            break
+
+    docs_raw = efetch_abstracts(pmids, chunk_size=200, workers=3, use_cache=True)
+    docs: List[Document] = []
+    for p in pmids:
+        rec = docs_raw.get(p)
+        if not rec: continue
+        docs.append(Document(**rec))
+
+    write_json(outp / "identification.json", {
+        "queries_from_llm": crit.boolean_queries,
+        "queries_used": queries,
+        "query_translations": per_query_trans,
+        "query_stats": per_query_hits,
+        "hits": len(docs),
+        "year_min": crit.picos.year_min,
+        "languages": crit.picos.languages,
+    })
+
+    if not docs:
+        log.info("No documents retrieved. Done.")
+        return
+
+    # ---------- Embeddings & signals ----------
+    log.info(f"Embedding {len(docs)} documents…")
+    emb, idx = build_embeddings(docs)
+    intent_vec = embed_texts([prompt])[0]
+    signals = compute_signals(
+        docs=docs, emb=emb, idx=idx, intent_vec=intent_vec,
+        seed_pmids=[], year_min=crit.picos.year_min
+    )
+
+    # ---------- Gates (hard objective only) ----------
+    lanes: Dict[str, str] = {}
+    gate_reason: Dict[str, str] = {}
+    eligible_for_llm: List[Document] = []
+    for d in docs:
+        g = objective_gate(d, crit.picos)
+        if g:
+            lanes[d.pmid] = "auto_exclude"
+            gate_reason[d.pmid] = g[1]
+        else:
+            lanes[d.pmid] = "uncertain"
+            eligible_for_llm.append(d)
+
+    # ---------- Regressor (ranking only; NEVER excludes) ----------
+    X = [featurize_row(signals[d.pmid], d) for d in docs]
+    try:
+        import numpy as np
+        reg = OnlineRegressor()
+        y0 = np.array([0 if lanes[d.pmid]=="auto_exclude" else 1 for d in docs], dtype="int32")
+        reg.fit_bootstrap(np.stack(X), y0)
+        p_all = reg.predict_proba(np.stack(X))
+        model_p = {docs[i].pmid: float(p_all[i]) for i in range(len(docs))}
+    except Exception:
+        model_p = {d.pmid: 0.5 for d in docs}
+
+    # ---------- LLM screening (ALL eligible docs go) ----------
+    log.info(f"Sending {len(eligible_for_llm)} docs to LLM screening…")
+    decisions = {dec.pmid: dec for dec in llm_decide_batch(crit, eligible_for_llm, signals_map=signals, temperature=0.1)}
+
+    # ---------- Finalize ledger ----------
+    ledger: List[LedgerRow] = []
+    for d in docs:
+        pmid = d.pmid
+        lane = lanes[pmid]
+        llm_dec = decisions.get(pmid)
+
+        if lane == "auto_exclude":
+            final_decision = "exclude"
+            final_reason = gate_reason.get(pmid, "off_topic")
+            topic_rel = "off_topic"
+        else:
+            if llm_dec is None:
+                final_decision = "borderline"
+                final_reason = "insufficient_info"
+                topic_rel = "unknown"
+                lane = "sent_to_llm"  # still mark it
+            else:
+                final_decision = llm_dec.decision
+                final_reason = llm_dec.primary_reason
+                topic_rel = llm_dec.topic_relevance
+                lane = "sent_to_llm"
+
+        ledger.append(LedgerRow(
+            pmid=pmid,
+            lane_before_llm=lane,
+            gate_reason=gate_reason.get(pmid),
+            model_p=model_p.get(pmid, 0.5),
+            llm=llm_dec,
+            final_decision=final_decision,
+            final_reason=final_reason,
+            topic_relevance=topic_rel,
+            signals=signals[pmid],
+            pub_types=d.pub_types,
+            year=d.year,
+            title=d.title or "",
+            abstract=d.abstract or "",
+        ))
+
+    # ---------- Outputs ----------
+    fieldnames = [
+        "pmid","lane_before_llm","gate_reason","model_p",
+        "final_decision","final_reason","topic_relevance",
+        "sem_intent","sem_seed","graph_ppr_pct","graph_links_frac","year_scaled","abstract_len_bin",
+        "pub_types","year","title","abstract"
+    ]
+    rows = []
+    for r in ledger:
+        rows.append({
+            "pmid": r.pmid,
+            "lane_before_llm": r.lane_before_llm,
+            "gate_reason": r.gate_reason or "",
+            "model_p": f"{r.model_p:.4f}" if r.model_p is not None else "",
+            "final_decision": r.final_decision,
+            "final_reason": r.final_reason,
+            "topic_relevance": r.topic_relevance or "unknown",
+            "sem_intent": f"{r.signals.sem_intent:.4f}",
+            "sem_seed": f"{r.signals.sem_seed:.4f}",
+            "graph_ppr_pct": f"{r.signals.graph_ppr_pct:.1f}",
+            "graph_links_frac": f"{r.signals.graph_links_frac:.4f}",
+            "year_scaled": f"{r.signals.year_scaled:.4f}",
+            "abstract_len_bin": r.signals.abstract_len_bin,
+            "pub_types": ";".join(r.pub_types),
+            "year": r.year or "",
+            "title": r.title,
+            "abstract": r.abstract
+        })
+    write_tsv(outp / "screening.tsv", rows, fieldnames)
+
+    adjunct_rows = []
+    for r in ledger:
+        if r.topic_relevance in {"adjacent_meta_analysis","adjacent_review","adjacent_guideline","adjacent_case_report"}:
+            adjunct_rows.append({
+                "pmid": r.pmid,
+                "topic_relevance": r.topic_relevance,
+                "final_decision": r.final_decision,
+                "pub_types": ";".join(r.pub_types),
+                "year": r.year or "",
+                "title": r.title
+            })
+    if adjunct_rows:
+        write_csv(outp / "adjunct.csv", adjunct_rows, ["pmid","topic_relevance","final_decision","pub_types","year","title"])
+
+    pc = prisma_counts(ledger)
+    write_json(outp / "prisma.json", pc)
+
+    gate_counts = defaultdict(int)
+    for r in ledger:
+        if r.gate_reason:
+            gate_counts[r.gate_reason] += 1
+    log.info(f"Gates (auto_exclude reasons): {dict(gate_counts)}")
+    lane_summary = defaultdict(int)
+    for r in ledger: lane_summary[r.lane_before_llm] += 1
+    log.info(f"Lanes summary: {dict(lane_summary)}")
+    dec_summary = defaultdict(int)
+    for r in ledger: dec_summary[r.final_decision] += 1
+    log.info(f"Decisions: {dict(dec_summary)}")
+    log.info(f"Done in {time.time()-t0:.1f}s. Records: {len(docs)} | Ledger: {len(ledger)} | Out: {outp}")
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("prompt", type=str, help="Intent/preferences paragraph")
+    ap.add_argument("--languages", type=str, default=",".join(DEFAULT_LANGS))
+    ap.add_argument("--year-min", type=int, default=DEFAULT_YEAR_MIN)
+    ap.add_argument("--out", type=str, default="")
+    ap.add_argument("--max-records", type=int, default=300)
+    args = ap.parse_args()
+
+    langs = [x.strip() for x in (args.languages or "").split(",") if x.strip()]
+    run(
+        prompt=args.prompt,
+        languages=langs,
+        year_min=args.year_min,
+        out_dir=args.out,
+        max_records=args.max_records,
+    )
+
+if __name__ == "__main__":
+    main()
 
 
 
 ###############################################################################
 ### FILE: config/defaults.py
 ###############################################################################
+# src/config/defaults.py
 from __future__ import annotations
 import os
+import os.path as _p
 
 # ---- External services ----
 LMSTUDIO_BASE    = os.getenv("LMSTUDIO_BASE", "http://127.0.0.1:1234")
@@ -145,14 +382,17 @@ LMSTUDIO_CHAT    = os.getenv("LMSTUDIO_CHAT_MODEL", "gemma-3n-e2b-it")
 ENTREZ_EMAIL     = os.getenv("ENTREZ_EMAIL", "you@example.com")
 ENTREZ_API_KEY   = os.getenv("ENTREZ_API_KEY", "")
 HTTP_TIMEOUT     = int(os.getenv("HTTP_TIMEOUT", "30"))
-USER_AGENT       = os.getenv("USER_AGENT", "sr-screener/0.1 (+local)")
+USER_AGENT       = os.getenv("USER_AGENT", "sr-screener/0.2 (+local)")
 
 ICITE_BASE       = os.getenv("ICITE_BASE", "https://icite.od.nih.gov/api/pubs")
 
 # ---- Retrieval ----
 ESEARCH_RETMAX_PER_QUERY = int(os.getenv("ESEARCH_RETMAX_PER_QUERY", "2000"))
+QUERY_HIT_MIN            = int(os.getenv("QUERY_HIT_MIN", "5"))
+QUERY_HIT_MAX            = int(os.getenv("QUERY_HIT_MAX", "2500"))
+MAX_QUERY_VARIANTS       = int(os.getenv("MAX_QUERY_VARIANTS", "6"))  # keep it tight
 
-# ---- FS (define early; used by VEC_DB_PATH) ----
+# ---- FS ----
 DATA_DIR         = os.getenv("DATA_DIR", "data")
 RUNS_DIR         = os.getenv("RUNS_DIR", "runs")
 
@@ -166,7 +406,7 @@ EMB_RETRY_BACKOFF_S   = float(os.getenv("EMB_RETRY_BACKOFF_S", "1.2"))
 EMB_RETRY_MAX         = int(os.getenv("EMB_RETRY_MAX", "4"))
 
 # ---- Vector DB (sqlite) ----
-VEC_DB_PATH      = os.getenv("VEC_DB_PATH", os.path.join(DATA_DIR, "cache", "vectors.sqlite3"))
+VEC_DB_PATH      = os.getenv("VEC_DB_PATH", _p.join(DATA_DIR, "cache", "vectors.sqlite3"))
 
 # ---- Seeds & thresholds ----
 SEED_SEM_TAU_HI  = float(os.getenv("SEED_SEM_TAU_HI", "0.92"))
@@ -189,18 +429,13 @@ LLM_BUDGET       = int(os.getenv("LLM_BUDGET", "150"))
 
 # ---- Languages & year defaults ----
 DEFAULT_LANGS    = os.getenv("DEFAULT_LANGS", "English,Portuguese,Spanish").split(",")
-DEFAULT_YEAR_MIN = int(os.getenv("DEFAULT_YEAR_MIN", "2000"))
-
-# ---- FS ----
-DATA_DIR         = os.getenv("DATA_DIR", "data")
-RUNS_DIR         = os.getenv("RUNS_DIR", "runs")
+DEFAULT_YEAR_MIN = int(os.getenv("DEFAULT_YEAR_MIN", "2015"))
 
 
 
 ###############################################################################
 ### FILE: config/schema.py
 ###############################################################################
-# src/config/schema.py
 from __future__ import annotations
 from typing import List, Dict, Optional, Literal, Any
 from pydantic import BaseModel, Field
@@ -208,6 +443,12 @@ from pydantic import BaseModel, Field
 Reason = Literal[
     "design_mismatch","population_mismatch","intervention_mismatch",
     "language","year","insufficient_info","off_topic"
+]
+
+TopicRelevance = Literal[
+    "primary_rct","primary_observational",
+    "adjacent_meta_analysis","adjacent_review","adjacent_guideline","adjacent_case_report",
+    "background","off_topic","unknown"
 ]
 
 class PICOS(BaseModel):
@@ -221,10 +462,8 @@ class PICOS(BaseModel):
 
 class Criteria(BaseModel):
     picos: PICOS
-    # <-- be permissive; the LLM may return lists/ints/bools etc.
     inclusion_criteria: Dict[str, Any] = Field(default_factory=dict)
     exclusion_criteria: Dict[str, Any] = Field(default_factory=dict)
-    # be flexible here too
     reason_taxonomy: List[str] = Field(default_factory=list)
     boolean_queries: Dict[str, str] = Field(default_factory=dict)
 
@@ -251,16 +490,18 @@ class DecisionLLM(BaseModel):
     decision: Literal["include","exclude","borderline"]
     primary_reason: Reason
     confidence: float
+    topic_relevance: TopicRelevance = "unknown"
     evidence: Dict[str, str]
 
 class LedgerRow(BaseModel):
     pmid: str
-    lane_before_llm: Literal["auto_exclude","auto_include","sent_to_llm","model_exclude","model_include","uncertain"]
+    lane_before_llm: Literal["auto_exclude","auto_include","sent_to_llm","model_include","uncertain"]
     gate_reason: Optional[Reason] = None
     model_p: Optional[float] = None
     llm: Optional[DecisionLLM] = None
     final_decision: Literal["include","exclude","borderline"]
     final_reason: Reason
+    topic_relevance: TopicRelevance = "unknown"
     signals: Signals
     pub_types: List[str]
     year: Optional[int]
@@ -371,8 +612,9 @@ class DocDB:
 ### FILE: io/store.py
 ###############################################################################
 from __future__ import annotations
-import os, pathlib, json, csv
+import pathlib, json, csv
 from typing import Any, List, Dict
+
 from src.config.defaults import RUNS_DIR
 
 def ensure_run_dir(out_dir: str) -> pathlib.Path:
@@ -381,12 +623,22 @@ def ensure_run_dir(out_dir: str) -> pathlib.Path:
     return p
 
 def write_json(path: pathlib.Path, obj: Any):
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 def write_tsv(path: pathlib.Path, rows: List[Dict[str,Any]], fieldnames: List[str]):
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, delimiter="\t", fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+def write_csv(path: pathlib.Path, rows: List[Dict[str,Any]], fieldnames: List[str]):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         for r in rows:
             w.writerow(r)
@@ -464,40 +716,40 @@ class VecDB:
 ### FILE: net/entrez.py
 ###############################################################################
 from __future__ import annotations
-import requests, re, time, math, concurrent.futures, xml.etree.ElementTree as ET
-from typing import List, Dict, Any, Iterable, Optional, Tuple
+import requests, re, time, concurrent.futures, xml.etree.ElementTree as ET
+from typing import List, Dict, Any, Iterable, Optional
 import logging
 from src.config.defaults import ENTREZ_EMAIL, ENTREZ_API_KEY, HTTP_TIMEOUT, USER_AGENT
-from src.io.docdb import DocDB
 
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 log = logging.getLogger("entrez")
 
-# add near top of file (after imports)
 _LANG_MAP = {
     "eng": "English", "en": "English", "english": "English",
     "spa": "Spanish", "es": "Spanish", "spanish": "Spanish",
     "por": "Portuguese", "pt": "Portuguese", "portuguese": "Portuguese",
     "fra": "French", "fre": "French", "fr": "French", "french": "French",
-    "ger": "German", "deu": "German", "de": "German", "german": "German",
-    # extend as needed
+    "deu": "German", "ger":"German", "de": "German", "german": "German",
 }
 
 def _norm_lang_name(s: str | None) -> str | None:
-    if not s:
-        return None
+    if not s: return None
     key = s.strip().lower()
     return _LANG_MAP.get(key, s)
 
-def esearch(query: str, db: str = "pubmed", retmax: int = 10000, mindate: Optional[int]=None, maxdate: Optional[int]=None, sort: str="date") -> List[str]:
+def esearch(query: str, db: str = "pubmed", retmax: int = 10000, mindate: Optional[int]=None, maxdate: Optional[int]=None, sort: str="date") -> Dict[str, Any]:
     params = {"db": db, "term": query, "retmode": "json", "retmax": retmax, "sort": sort, "email": ENTREZ_EMAIL}
     if ENTREZ_API_KEY: params["api_key"] = ENTREZ_API_KEY
     if mindate: params["mindate"] = str(mindate)
     if maxdate: params["maxdate"] = str(maxdate)
     r = requests.get(f"{EUTILS}/esearch.fcgi", headers=HEADERS, params=params, timeout=HTTP_TIMEOUT)
     r.raise_for_status()
-    return r.json().get("esearchresult", {}).get("idlist", [])
+    js = r.json().get("esearchresult", {})
+    ids = js.get("idlist", [])
+    count = int(js.get("count", "0"))
+    translation = js.get("querytranslation") or ""
+    return {"ids": ids, "count": count, "translation": translation}
 
 def _parse_pubmed_xml(xml_text: str) -> Dict[str, Dict[str,Any]]:
     out: Dict[str,Dict[str,Any]] = {}
@@ -537,60 +789,20 @@ def _efetch_chunk(chunk: List[str]) -> Dict[str, Dict[str,Any]]:
     return _parse_pubmed_xml(r.text)
 
 def efetch_abstracts(pmids: Iterable[str], chunk_size: int = 200, workers: int = 3, use_cache: bool = True) -> Dict[str, Dict[str,Any]]:
-    """Polite parallel efetch with caching + progress logs."""
-    pmids = [str(p) for p in pmids]
+    pmids = [str(p) for p in pmids if p]
     if not pmids: return {}
-
-    cache = DocDB() if use_cache else None
-    have: Dict[str,Dict[str,Any]] = {}
-    todo = pmids
-
-    if cache:
-        cached = cache.get_many(pmids)
-        if cached:
-            for k, v in cached.items():
-                have[k] = v
-            todo = [p for p in pmids if p not in cached]
-
-    log.info(f"efetch: total={len(pmids)} (cache hit={len(have)}, miss={len(todo)}), chunk={chunk_size}, workers={workers}")
-
-    if not todo:
-        return have
-
-    chunks = [todo[i:i+chunk_size] for i in range(0, len(todo), chunk_size)]
-    # Courtesy: limit concurrency; add slight pacing between submissions to avoid burst.
     results: Dict[str,Dict[str,Any]] = {}
-    submitted = 0
-    t0 = time.monotonic()
-
+    # simple polite parallel fetch
+    chunks = [pmids[i:i+chunk_size] for i in range(0, len(pmids), chunk_size)]
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = []
-        for ch in chunks:
-            futs.append(ex.submit(_efetch_chunk, ch))
-            submitted += 1
-            time.sleep(0.10)  # tiny stagger
-
-        done = 0
+        futs = [ex.submit(_efetch_chunk, ch) for ch in chunks]
         for fut in concurrent.futures.as_completed(futs):
             try:
-                part = fut.result()
-                results.update(part)
+                results.update(fut.result())
             except Exception as e:
                 log.warning(f"efetch chunk failed: {e}")
-            done += 1
-            if done % 3 == 0 or done == len(chunks):
-                dt = time.monotonic() - t0
-                log.info(f"efetch progress {done}/{len(chunks)} chunks | items={sum(len(c) for c in chunks[:done])}/{len(todo)} | {dt:.1f}s")
-
-            # polite global pacing (aim ~3-5 req/s overall)
-            time.sleep(0.05)
-
-    # merge + persist
-    have.update(results)
-    if cache and results:
-        cache.put_many(results)
-
-    return have
+            time.sleep(0.08)
+    return results
 
 
 
@@ -688,12 +900,14 @@ def prisma_counts(ledger: List[LedgerRow]) -> Dict[str, Any]:
     N = len(ledger)
     decided = Counter(r.final_decision for r in ledger)
     reasons = Counter(r.final_reason for r in ledger)
+    topic = Counter((r.topic_relevance or "unknown") for r in ledger)
     return {
         "records_screened": N,
         "included": decided.get("include", 0),
         "excluded": decided.get("exclude", 0),
         "borderline": decided.get("borderline", 0),
         "exclusions_by_reason": dict(reasons),
+        "by_topic_relevance": dict(topic),
     }
 
 
@@ -805,21 +1019,33 @@ from __future__ import annotations
 from typing import Optional, Tuple
 from src.config.schema import Document, PICOS, Reason
 
-PRIMARY_TYPES = {"Randomized Controlled Trial","Clinical Trial","Cohort Studies","Case-Control Studies","Observational Study","Controlled Clinical Trial","Prospective Studies"}
-NON_PRIMARY_TYPES = {"Review","Meta-Analysis","Editorial","Letter","Comment","News","Case Reports","Guideline"}
+# Primary designs (hinting only elsewhere; NOT used to auto-exclude)
+PRIMARY_TYPES = {
+    "Randomized Controlled Trial","Clinical Trial","Cohort Studies",
+    "Case-Control Studies","Observational Study","Controlled Clinical Trial",
+    "Prospective Studies"
+}
+
+# Only true non-research / admin junk is auto-excluded here
+HARD_EXCLUDE_TYPES = {
+    "Editorial","Letter","Comment","News","Newspaper Article","Interview",
+    "Published Erratum","Retraction of Publication","Retracted Publication",
+    "Expression of Concern","Congresses"
+}
+# NOTE: We do NOT auto-exclude Review/Meta-Analysis/Guideline/Case Reports.
+
 LANG_MAP = {
     "eng": "English", "en": "English", "english": "English",
     "spa": "Spanish", "es": "Spanish", "spanish": "Spanish",
     "por": "Portuguese", "pt": "Portuguese", "portuguese": "Portuguese",
 }
-REV_LANG = {}
 
+REV_LANG = {}
 for code_or_name, pretty in LANG_MAP.items():
     REV_LANG.setdefault(pretty, set()).add(code_or_name)
 
 def _norm_lang(s: str | None) -> str | None:
-    if not s:
-        return None
+    if not s: return None
     return LANG_MAP.get(s.strip().lower(), s)
 
 def _lang_ok(doc_lang: str | None, allowed: list[str]) -> bool:
@@ -829,7 +1055,6 @@ def _lang_ok(doc_lang: str | None, allowed: list[str]) -> bool:
     allowed_norm = {_norm_lang(a) or a for a in allowed}
     if dl in allowed_norm:
         return True
-    # also accept if doc code matches one of the allowed names
     for a in allowed_norm:
         for alias in REV_LANG.get(a, set()):
             if doc_lang.strip().lower() == alias:
@@ -837,13 +1062,17 @@ def _lang_ok(doc_lang: str | None, allowed: list[str]) -> bool:
     return False
 
 def objective_gate(doc: Document, picos: PICOS) -> Optional[Tuple[str, Reason]]:
+    # Year
     if picos.year_min and doc.year is not None and doc.year < int(picos.year_min):
         return ("year", "year")
+    # Language
     if picos.languages and doc.language and not _lang_ok(doc.language, picos.languages):
         return ("language", "language")
+    # Missing both title and abstract
     if (not (doc.title or "").strip()) and (not (doc.abstract or "").strip()):
         return ("insufficient_info", "insufficient_info")
-    if set(doc.pub_types) & NON_PRIMARY_TYPES:
+    # Hard non-research types only
+    if set(doc.pub_types) & HARD_EXCLUDE_TYPES:
         return ("design_mismatch", "design_mismatch")
     return None
 
@@ -855,11 +1084,10 @@ def is_primary_design(doc: Document) -> bool:
 ###############################################################################
 ### FILE: screen/llm_decide.py
 ###############################################################################
-# src/screen/llm_decide.py
 from __future__ import annotations
 from typing import List, Dict, Any
 import math
-from src.config.schema import Criteria, Document, DecisionLLM
+from src.config.schema import Criteria, Document, DecisionLLM, TopicRelevance
 from src.text.llm import chat_json
 from src.text.prompts import P1_SYSTEM
 from src.screen.features import signal_card
@@ -869,7 +1097,12 @@ _ALLOWED = {
     "language","year","insufficient_info","off_topic"
 }
 
-# JSON Schema LM Studio can enforce (strict)
+_TOPIC = {
+    "primary_rct","primary_observational",
+    "adjacent_meta_analysis","adjacent_review","adjacent_guideline","adjacent_case_report",
+    "background","off_topic","unknown"
+}
+
 DECISION_SCHEMA: Dict[str, Any] = {
     "name": "decision",
     "schema": {
@@ -880,6 +1113,7 @@ DECISION_SCHEMA: Dict[str, Any] = {
             "decision": {"type": "string", "enum": ["include","exclude","borderline"]},
             "primary_reason": {"type": "string", "enum": sorted(list(_ALLOWED))},
             "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "topic_relevance": {"type": "string", "enum": sorted(list(_TOPIC))},
             "evidence": {
                 "type": "object",
                 "additionalProperties": False,
@@ -892,7 +1126,7 @@ DECISION_SCHEMA: Dict[str, Any] = {
                 "required": ["population_quote","intervention_quote","design_evidence","notes"]
             }
         },
-        "required": ["pmid","decision","primary_reason","confidence","evidence"]
+        "required": ["pmid","decision","primary_reason","confidence","topic_relevance","evidence"]
     }
 }
 
@@ -905,14 +1139,13 @@ def _canonical_reason(txt: str) -> str:
     t = _norm_str(txt).lower()
     if t in _ALLOWED:
         return t
-    # heuristic mapping from free-text to our enums
-    if any(k in t for k in ["observational", "cohort", "case-control", "registry", "review", "meta-"]):
+    if any(k in t for k in ["observational", "cohort", "case-control", "registry"]):
         return "design_mismatch"
-    if any(k in t for k in ["randomized", "rct", "trial design mismatch", "not randomized"]):
+    if any(k in t for k in ["randomized", "rct"]):
         return "design_mismatch"
-    if any(k in t for k in ["population", "pediatric", "child", "children", "adult", "adolescent", "mismatch pop"]):
+    if any(k in t for k in ["population", "pediatric", "child", "children", "adult", "adolescent"]):
         return "population_mismatch"
-    if any(k in t for k in ["intervention", "wrong treatment", "not cryoablation", "different procedure"]):
+    if any(k in t for k in ["intervention", "cryo", "neurolys", "nerve"]):
         return "intervention_mismatch"
     if "language" in t:
         return "language"
@@ -922,8 +1155,23 @@ def _canonical_reason(txt: str) -> str:
         return "insufficient_info"
     if any(k in t for k in ["off-topic", "not relevant", "unrelated", "irrelevant"]):
         return "off_topic"
-    # default bucket
     return "off_topic"
+
+def _canonical_topic(txt: str) -> TopicRelevance:
+    t = _norm_str(txt).lower()
+    for k in _TOPIC:
+        if t == k:
+            return k  # type: ignore
+    # light heuristics
+    if "meta" in t or "systematic" in t: return "adjacent_meta_analysis"  # type: ignore
+    if "review" in t: return "adjacent_review"  # type: ignore
+    if "guideline" in t: return "adjacent_guideline"  # type: ignore
+    if "case report" in t: return "adjacent_case_report"  # type: ignore
+    if "rct" in t or "random" in t: return "primary_rct"  # type: ignore
+    if "observational" in t or "cohort" in t or "case-control" in t: return "primary_observational"  # type: ignore
+    if "off" in t: return "off_topic"  # type: ignore
+    if "background" in t: return "background"  # type: ignore
+    return "unknown"  # type: ignore
 
 def _normalize_evidence(e: Any) -> Dict[str,str]:
     if not isinstance(e, dict): e = {}
@@ -938,18 +1186,17 @@ def _coerce_decision(js: Dict[str, Any]) -> DecisionLLM:
     pmid = _norm_str(js.get("pmid", ""))
     decision = _norm_str(js.get("decision", "")).lower()
     if decision not in {"include","exclude","borderline"}:
-        # weak fallback
         decision = "borderline"
     reason = _canonical_reason(js.get("primary_reason",""))
-    # keep in [0,1]
     try:
         conf = float(js.get("confidence", 0.5))
         if not math.isfinite(conf): conf = 0.5
     except Exception:
         conf = 0.5
     conf = max(0.0, min(1.0, conf))
+    topic = _canonical_topic(js.get("topic_relevance","unknown"))
     ev = _normalize_evidence(js.get("evidence", {}))
-    return DecisionLLM(pmid=pmid, decision=decision, primary_reason=reason, confidence=conf, evidence=ev)
+    return DecisionLLM(pmid=pmid, decision=decision, primary_reason=reason, confidence=conf, topic_relevance=topic, evidence=ev)
 
 def llm_decide_batch(criteria: Criteria, docs: List[Document], signals_map: dict, temperature: float = 0.1) -> List[DecisionLLM]:
     out: List[DecisionLLM] = []
@@ -961,16 +1208,10 @@ def llm_decide_batch(criteria: Criteria, docs: List[Document], signals_map: dict
             f"{signal_card(sig)}\n"
             "Return the JSON now."
         )
-        # 1) Try with schema (strict)
         try:
-            raw = chat_json(P1_SYSTEM, user, temperature=temperature, max_tokens=600, schema=DECISION_SCHEMA)
-            out.append(_coerce_decision(raw))
-            continue
+            raw = chat_json(P1_SYSTEM, user, temperature=temperature, max_tokens=700, schema=DECISION_SCHEMA)
         except Exception:
-            pass
-
-        # 2) Fall back to plain JSON with retries/repair inside chat_json
-        raw = chat_json(P1_SYSTEM, user, temperature=0.0, max_tokens=600, schema=None)
+            raw = chat_json(P1_SYSTEM, user, temperature=0.0, max_tokens=700, schema=None)
         out.append(_coerce_decision(raw))
     return out
 
@@ -1210,20 +1451,19 @@ def embed_docs_with_cache(pmids: List[str], texts: List[str], model: Optional[st
 ###############################################################################
 ### FILE: text/llm.py
 ###############################################################################
-# src/text/llm.py
 from __future__ import annotations
-import json, re, requests, time
+import json, re, requests
 from typing import Optional, Dict, Any
 from src.config.defaults import LMSTUDIO_BASE, LMSTUDIO_CHAT, HTTP_TIMEOUT, USER_AGENT
 
-HEADERS = {"Content-Type":"application/json","User-Agent":USER_AGENT}
-
+HEADERS = {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": USER_AGENT}
 _FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9]*\s*|\s*```\s*$", re.M)
 
 def _strip_md_fences(s: str) -> str:
     return _FENCE_RE.sub("", s).strip()
 
 def _extract_json_block(text: str) -> str:
+    # Prefer object; fallback to array; else raw
     m = re.search(r"\{[\s\S]*\}", text)
     if m: return m.group(0)
     m = re.search(r"\[[\s\S]*\]", text)
@@ -1232,8 +1472,11 @@ def _extract_json_block(text: str) -> str:
 
 def _quick_sanitize(js: str) -> str:
     s = js
+    # smart quotes → ascii
     s = s.replace("\u201c", '"').replace("\u201d", '"').replace("\u2018", "'").replace("\u2019", "'")
+    # trailing commas
     s = re.sub(r",\s*(\}|\])", r"\1", s)
+    # strip fenced code if any sneaks in
     s = s.replace("```", "")
     return s
 
@@ -1241,35 +1484,11 @@ def _post_chat(body: dict) -> str:
     url = f"{LMSTUDIO_BASE.rstrip('/')}/v1/chat/completions"
     r = requests.post(url, headers=HEADERS, json=body, timeout=HTTP_TIMEOUT)
     r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
-
-def _repair_json_via_llm(bad: str) -> str:
-    # Last-ditch fixer: rewrite as strict JSON
-    system = (
-        "You are a JSON fixer. Convert the given content into STRICT, VALID JSON.\n"
-        "Rules:\n"
-        "- Use only double-quoted keys and values.\n"
-        "- Escape internal quotes inside strings.\n"
-        "- No markdown, no comments, no trailing commas.\n"
-        "- Keep existing keys if present.\n"
-        "Return JSON ONLY."
-    )
-    body = {
-        "model": LMSTUDIO_CHAT,
-        "messages": [{"role":"system","content":system},{"role":"user","content":bad}],
-        "temperature": 0.0,
-        "max_tokens": 900,
-        "stream": False
-    }
-    content = _post_chat(body)
-    content = _strip_md_fences(content)
-    repaired = _extract_json_block(content)
-    repaired = _quick_sanitize(repaired)
-    return repaired
+    js = r.json()
+    # LM Studio returns {"choices":[{"message":{"content": ...}}]}
+    return js["choices"][0]["message"]["content"]
 
 def _mk_schema_response_format(schema: dict) -> dict:
-    # LM Studio supports JSON Schema with strict mode
-    # https://lmstudio.ai/docs/guides/structured-output
     return {
         "type": "json_schema",
         "json_schema": {
@@ -1279,89 +1498,52 @@ def _mk_schema_response_format(schema: dict) -> dict:
         }
     }
 
+def _try_request(messages, temperature, max_tokens, response_format: Optional[dict]) -> str:
+    body = {
+        "model": LMSTUDIO_CHAT,
+        "messages": messages,
+        "temperature": float(temperature),
+        "max_tokens": int(max_tokens),
+        "stream": False,
+    }
+    if response_format is not None:
+        body["response_format"] = response_format
+    return _post_chat(body)
+
 def chat_json(
     system: str,
     user: str,
     temperature: float = 0.1,
-    max_tokens: int = 700,
+    max_tokens: int = 900,
     schema: Optional[dict] = None,
-    retries: int = 2
 ) -> dict:
     """
-    Try 1: JSON Schema (strict) if provided.
-    Try 2: response_format=json_object (plain JSON mode).
-    Try 3: re-ask with stricter system "JSON ONLY".
-    Try 4: string-repair via fixer LLM.
+    Robust JSON chat:
+      1) If schema provided, try once WITH response_format=json_schema.
+      2) If that 4xx/5xx or parse fails, retry WITHOUT response_format (plain).
+      3) If still not JSON, try to extract and sanitize braces.
+      4) If all fails, raise a clear Exception.
     """
-    # --- Attempt 1: schema (if provided)
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+    # Attempt A: schema format (some LM Studio builds support this)
     if schema is not None:
-        body = {
-            "model": LMSTUDIO_CHAT,
-            "messages": [{"role":"system","content":system},{"role":"user","content":user}],
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": False,
-            "response_format": _mk_schema_response_format(schema),
-        }
         try:
-            content = _post_chat(body)
+            content = _try_request(messages, temperature, max_tokens, response_format=_mk_schema_response_format(schema))
             raw = _quick_sanitize(_extract_json_block(_strip_md_fences(content)))
             return json.loads(raw)
         except Exception:
-            # fall through to next attempts
+            # fallthrough to plain mode
             pass
 
-    # --- Attempt 2: json_object mode
-    body2 = {
-        "model": LMSTUDIO_CHAT,
-        "messages": [{"role":"system","content":system},{"role":"user","content":user}],
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "stream": False,
-        "response_format": {"type": "json_object"}  # usually supported; if not, server ignores
-    }
+    # Attempt B: plain request (no response_format at all)
     try:
-        content = _post_chat(body2)
+        content = _try_request(messages, temperature, max_tokens, response_format=None)
         raw = _quick_sanitize(_extract_json_block(_strip_md_fences(content)))
         return json.loads(raw)
-    except Exception:
-        pass
-
-    # --- Attempt 3: re-ask with an ultra-strict system prompt
-    strict_system = (
-        "Return STRICT JSON only. No prose. No markdown. No trailing commas. "
-        "If an enum is requested, ONLY use one of the allowed values."
-    )
-    body3 = {
-        "model": LMSTUDIO_CHAT,
-        "messages": [
-            {"role":"system","content":strict_system + "\n\n" + system},
-            {"role":"user","content":user}
-        ],
-        "temperature": 0.0,
-        "max_tokens": max_tokens,
-        "stream": False
-    }
-    try:
-        content = _post_chat(body3)
-        raw = _quick_sanitize(_extract_json_block(_strip_md_fences(content)))
-        return json.loads(raw)
-    except Exception:
-        pass
-
-    # --- Attempt 4: repair whatever we got from attempt 2/3 if any, else from the user prompt echo
-    # Re-run the best-effort request once and try repair
-    try:
-        content = _post_chat(body2)
-    except Exception:
-        content = _post_chat(body3)
-
-    raw = _quick_sanitize(_extract_json_block(_strip_md_fences(content)))
-    try:
-        return json.loads(raw)
-    except Exception:
-        repaired = _repair_json_via_llm(raw)
-        return json.loads(repaired)
+    except Exception as e:
+        # We tried; produce an actionable error with the best we can show
+        raise RuntimeError(f"chat_json failed to parse JSON from LM Studio response: {e}")
 
 
 
@@ -1370,35 +1552,43 @@ def chat_json(
 ###############################################################################
 P0_SYSTEM = """
 You are configuring a PRISMA title/abstract screening. From the user's description and preferences,
-produce strict, machine-parseable criteria and PubMed boolean queries.
+produce strict, machine-parseable criteria and a small set of PubMed boolean queries.
 
-Output requirements:
-- Return JSON ONLY (no code fences).
-- All strings must be valid JSON strings (escape inner double quotes in query strings).
-- Keys must include exactly:
-  picos (object with keys: population, intervention, comparison, outcomes (array of strings),
-         study_design (array of strings), year_min (int or null), languages (array of full language names)),
-  inclusion_criteria (object),
-  exclusion_criteria (object),
-  reason_taxonomy (array of enums from: ["design_mismatch","population_mismatch","intervention_mismatch","language","year","insufficient_info","off_topic"]),
-  boolean_queries (object of strings).
-
-Do not add any prose.
+Rules:
+- Return JSON ONLY (no prose, no code fences).
+- Keys: picos, inclusion_criteria, exclusion_criteria, reason_taxonomy (list of enums),
+        boolean_queries (object of strings).
+- For boolean_queries, produce 2–6 broad **Population × Intervention** variants first.
+  Prefer natural-language style (avoid field qualifiers like [Title/Abstract] unless clearly needed).
+  Keep them **recall-oriented**; rely on downstream filters for year/language/design.
 """
-
 
 def p0_user_prompt(intent_text: str) -> str:
     return f"INTENT/PREFERENCES:\n{intent_text}\n\nProduce the JSON now."
 
 P1_SYSTEM = """
-You are a PRISMA title/abstract screener. Decide INCLUDE, EXCLUDE, or BORDERLINE strictly
-from CRITERIA_JSON and the record. Use pub_types only for design; never infer design from title words.
-Do NOT exclude solely because outcomes are not stated; mark BORDERLINE instead.
-Treat Signals as hints (not sufficient reasons).
-Return JSON ONLY matching schema:
-{ "pmid": "...", "decision": "include|exclude|borderline", "primary_reason": "...",
-  "confidence": 0.0, "evidence": { "population_quote": "...", "intervention_quote": "...",
-  "design_evidence": "pub_types: [...] or empty", "notes": "..." } }.
+You are a PRISMA **TITLE & ABSTRACT** screener. Decide INCLUDE, EXCLUDE, or BORDERLINE strictly
+from CRITERIA_JSON and the record. Follow these rules:
+
+- Use **Publication Types** only as evidence of design; do not infer design from title words alone.
+- Do **NOT** exclude solely because outcomes are missing in the abstract → use BORDERLINE instead.
+- Reviews / Meta-Analyses / Guidelines / Case Reports are **not auto-excluded**: classify them via topic_relevance.
+  If they are directly on-topic and materially helpful to the question, INCLUDE with a suitable topic_relevance.
+- Treat Signals and model_p as hints; they are insufficient by themselves to include or exclude.
+- Return JSON ONLY matching schema:
+{
+  "pmid": "...",
+  "decision": "include|exclude|borderline",
+  "primary_reason": "design_mismatch|population_mismatch|intervention_mismatch|language|year|insufficient_info|off_topic",
+  "confidence": 0.0,
+  "topic_relevance": "primary_rct|primary_observational|adjacent_meta_analysis|adjacent_review|adjacent_guideline|adjacent_case_report|background|off_topic|unknown",
+  "evidence": {
+    "population_quote": "...",
+    "intervention_quote": "...",
+    "design_evidence": "pub_types: [...] or empty",
+    "notes": "one or two lines"
+  }
+}
 """
 
 
