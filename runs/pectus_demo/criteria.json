@@ -1,20 +1,20 @@
 {
   "picos": {
-    "population": "Adolescents+Adults",
-    "intervention": "Intercostal nerve cryoablation",
-    "comparison": "Thoracic epidural/Paravertebral/Standard care",
+    "population": "adolescents+adults",
+    "intervention": "intercostal nerve cryoablation",
+    "comparison": "thoracic epidural/paravertebral/standard care",
     "outcomes": [
       "LOS",
-      "Opioid",
-      "Pain",
-      "Neuropathic"
+      "opioid",
+      "pain",
+      "neuropathic"
     ],
     "study_design": [
       "RCT",
-      "Clinical trials",
-      "Cohort",
-      "Case-control",
-      "Observational"
+      "clinical trials",
+      "cohort",
+      "case-control",
+      "observational"
     ],
     "year_min": 2000,
     "languages": [
@@ -35,12 +35,6 @@
     "off_topic"
   ],
   "boolean_queries": {
-    "population": "Adolescents OR Adult",
-    "intervention": "Intercostal nerve cryoablation",
-    "comparison": "Thoracic epidural OR Paravertebral OR Standard care",
-    "outcomes": "LOS OR Opioid OR Pain OR Neuropathic",
-    "study_design": "RCT OR Clinical trials OR Cohort OR Case-control OR Observational",
-    "language": "English OR Portuguese OR Spanish",
-    "year": "2000:2024"
+    "title_abstract": "((ischemic pain OR chest pain) AND (pectus excavatum OR sunken chest)) AND (intercostal nerve cryoablation OR cryoablation) AND (adolescent OR adult) AND (RCT OR clinical trials OR cohort OR case-control OR observational) AND (thoracic epidural OR paravertebral OR standard care) AND (LOS OR opioid OR pain OR neuropathic) AND (language:EN OR language:PT OR language:ES) AND (year:2000:2024)"
   }
 }

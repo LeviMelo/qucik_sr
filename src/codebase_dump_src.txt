@@ -31,6 +31,8 @@ Project structure for '/c/Users/Galaxy/LEVI/projects/Python/qucik_sr/src':
   net/entrez.py
   net/icite.py
   prisma/__init__.py
+  prisma/__pycache__/__init__.cpython-312.pyc
+  prisma/__pycache__/counts.cpython-312.pyc
   prisma/counts.py
   screen/__init__.py
   screen/__pycache__/__init__.cpython-312.pyc
@@ -54,356 +56,78 @@ Project structure for '/c/Users/Galaxy/LEVI/projects/Python/qucik_sr/src':
 
 
 ###############################################################################
-### FILE: io/docdb.py
-###############################################################################
-from __future__ import annotations
-import sqlite3, pathlib, json
-from typing import Dict, List
-from src.config.defaults import DATA_DIR
-
-DB_PATH = pathlib.Path(DATA_DIR) / "cache" / "docs.sqlite3"
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-class DocDB:
-    def __init__(self, path: pathlib.Path = DB_PATH):
-        self.conn = sqlite3.connect(str(path))
-        self.conn.execute("""CREATE TABLE IF NOT EXISTS docs(
-            pmid TEXT PRIMARY KEY,
-            json TEXT NOT NULL
-        )""")
-        self.conn.commit()
-
-    def get_many(self, pmids: List[str]) -> Dict[str, dict]:
-        if not pmids: return {}
-        q = ",".join("?"*len(pmids))
-        cur = self.conn.execute(f"SELECT pmid,json FROM docs WHERE pmid IN ({q})", pmids)
-        out = {}
-        for pmid, blob in cur.fetchall():
-            try: out[pmid] = json.loads(blob)
-            except Exception: pass
-        return out
-
-    def put_many(self, rows: Dict[str, dict]) -> int:
-        if not rows: return 0
-        data = [(pmid, json.dumps(rec)) for pmid, rec in rows.items()]
-        self.conn.executemany("INSERT OR REPLACE INTO docs(pmid,json) VALUES(?,?)", data)
-        self.conn.commit()
-        return len(data)
-
-
-
-###############################################################################
-### FILE: io/vecdb.py
-###############################################################################
-from __future__ import annotations
-import sqlite3, pathlib, hashlib
-from typing import Dict, List, Tuple, Optional
-import numpy as np
-from src.config.defaults import VEC_DB_PATH
-
-_PATH = pathlib.Path(VEC_DB_PATH)
-_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-def _hash_text(model: str, text: str) -> str:
-    h = hashlib.blake2b(digest_size=16)
-    h.update(model.encode("utf-8", "ignore") + b"\x00" + text.encode("utf-8", "ignore"))
-    return h.hexdigest()
-
-class VecDB:
-    def __init__(self, path: pathlib.Path = _PATH):
-        self.conn = sqlite3.connect(str(path))
-        self.conn.execute("""
-        CREATE TABLE IF NOT EXISTS embeds(
-          pmid TEXT NOT NULL,
-          model TEXT NOT NULL,
-          hash TEXT NOT NULL,
-          dim  INTEGER NOT NULL,
-          vec  BLOB NOT NULL,
-          PRIMARY KEY (pmid, model)
-        )""")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS ix_embeds_hash ON embeds(hash)")
-        self.conn.commit()
-
-    def get_many(self, keys: List[Tuple[str,str]]) -> Dict[Tuple[str,str], Tuple[str,int,bytes]]:
-        if not keys: return {}
-        q = ",".join(["(?,?)"]*len(keys))
-        flat = []
-        for pmid, model in keys: flat.extend([pmid, model])
-        cur = self.conn.execute(f"SELECT pmid,model,hash,dim,vec FROM embeds WHERE (pmid,model) IN ({q})", flat)
-        out = {}
-        for pmid, model, h, dim, blob in cur.fetchall():
-            out[(pmid, model)] = (h, int(dim), blob)
-        return out
-
-    def upsert_many(self, rows: List[Tuple[str,str,str,int,bytes]]) -> int:
-        if not rows: return 0
-        self.conn.executemany("INSERT OR REPLACE INTO embeds(pmid,model,hash,dim,vec) VALUES(?,?,?,?,?)", rows)
-        self.conn.commit()
-        return len(rows)
-
-    @staticmethod
-    def make_hash(model: str, text: str) -> str:
-        return _hash_text(model, text)
-
-    @staticmethod
-    def pack_vec(x: np.ndarray) -> bytes:
-        assert x.dtype == np.float32
-        return x.tobytes()
-
-    @staticmethod
-    def unpack_vec(blob: bytes, dim: int) -> np.ndarray:
-        arr = np.frombuffer(blob, dtype=np.float32)
-        if arr.size != dim:
-            raise ValueError(f"vec size {arr.size} != dim {dim}")
-        return arr
-
-
-
-###############################################################################
 ### FILE: cli/main.py
 ###############################################################################
-from __future__ import annotations
-import sys, os, json, typer, time, logging
-from typing import List, Dict
-from src.config.defaults import (
-    ESEARCH_RETMAX_PER_QUERY, SEED_SEM_TAU_HI, SEED_MIN_COUNT, SEED_RELAX_STEP,
-    CILE_REL_GATE_FRAC, CILE_EXT_BUDGET, CILE_MAX_ACCEPT, CILE_HUB_QUARANTINE, CILE_MIN_HUB_SOFT,
-    REG_P_HI, REG_P_LO, LLM_BUDGET, DEFAULT_LANGS, DEFAULT_YEAR_MIN
-)
-from src.config.schema import Criteria, Document, LedgerRow
-from src.text.prompts import P0_SYSTEM, p0_user_prompt
-from src.text.llm import chat_json
-from src.net.entrez import esearch, efetch_abstracts
-from src.text.embed import embed_texts
-from src.screen.gates import objective_gate, is_primary_design
-from src.screen.features import build_embeddings, compute_signals
-from src.screen.regressor import OnlineRegressor, featurize_row
-from src.screen.llm_decide import llm_decide_batch
-from src.graph.cile import one_wave_expand
-from src.io.store import ensure_run_dir, write_json, write_tsv
+def _fallback_boolean_queries(level: str = "strict") -> Dict[str, str]:
+    """
+    Deterministic query packs for pectus excavatum (Nuss/MIRPE) + intercostal cryo*.
+    `level` controls how aggressive we filter inside PubMed; we prefer recall, then
+    let downstream gates prune by design/year/language.
 
-logging.basicConfig(
-    level=os.environ.get("LOGLEVEL", "INFO"),
-    format="%(asctime)s | %(levelname)s | %(name)s: %(message)s",
-    datefmt="%H:%M:%S"
-)
-log = logging.getLogger("cli")
+    Levels:
+      - "strict": TA-constrained, includes intercostal + cryo synonyms, no design filters.
+      - "medium": relax TA constraints on the cryo block; keep pectus TA.
+      - "loose": drop human/age, keep pectus+cryo core.
 
-app = typer.Typer(add_completion=False)
+    Year filter is applied in esearch via mindate (not embedded in the string).
+    """
+    # Pectus / Nuss / MIRPE synonyms
+    pectus = '(' + ' OR '.join([
+        '"pectus excavatum"[Title/Abstract]',
+        '"funnel chest"[Title/Abstract]',
+        '"Nuss procedure"[Title/Abstract]',
+        'Nuss[Title/Abstract]',
+        '"minimally invasive repair"[Title/Abstract]',
+        'MIRPE[Title/Abstract]'
+    ]) + ')'
 
-def _to_docs(meta_map: Dict[str,dict]) -> List[Document]:
-    docs = []
-    for pmid, m in meta_map.items():
-        docs.append(Document(
-            pmid=str(pmid), title=m.get("title") or "", abstract=m.get("abstract") or "",
-            year=m.get("year"), journal=m.get("journal"), language=m.get("language"),
-            pub_types=m.get("pub_types") or [], doi=m.get("doi")
-        ))
-    return docs
+    # Intercostal + cryo synonyms
+    intercostal = '(' + ' OR '.join([
+        '"intercostal nerve"[Title/Abstract]',
+        '"intercostal nerves"[Title/Abstract]'
+    ]) + ')'
 
-@app.command()
-def run(prompt: str = typer.Argument(..., help="Topic intent / preferences paragraph"),
-        languages: str = typer.Option(",".join(DEFAULT_LANGS), "--languages"),
-        year_min: int = typer.Option(DEFAULT_YEAR_MIN, "--year-min"),
-        out_dir: str = typer.Option("runs/demo", "--out"),
-        llm_budget: int = typer.Option(LLM_BUDGET, "--llm-budget"),
-        max_records: int = typer.Option(None, "--max-records", help="Dev cap: limit number of records processed"),
-        ):
-    t_start = time.monotonic()
-    run_dir = ensure_run_dir(out_dir)
+    cryo = '(' + ' OR '.join([
+        'cryoablat*[Title/Abstract]',
+        'cryoanalges*[Title/Abstract]',
+        'cryoneurolys*[Title/Abstract]',
+        '"cryo-analges*"[Title/Abstract]',
+        '"cryo-neurolys*"[Title/Abstract]'
+    ]) + ')'
 
-    try:
-        # ---- 1) P0 criteria ----
-        log.info("Phase P0: generating criteria via LLM…")
-        criteria_js = chat_json(P0_SYSTEM, p0_user_prompt(prompt))
-        # sanitize missing fields
-        if "picos" not in criteria_js:
-            criteria_js["picos"] = {"population":"","intervention":"","comparison":None,"outcomes":[],"study_design":[],
-                                    "year_min":year_min,"languages":languages.split(",")}
-        else:
-            criteria_js["picos"].setdefault("year_min", year_min)
-            # normalize languages to names, not codes
-            langs = languages.split(",")
-            criteria_js["picos"].setdefault("languages", langs)
-            if isinstance(criteria_js["picos"]["languages"], list) and all(len(x)<=3 for x in criteria_js["picos"]["languages"]):
-                criteria_js["picos"]["languages"] = langs
-        criteria = Criteria(**criteria_js)
-        write_json(run_dir/"criteria.json", criteria.model_dump())
-        log.info(f"Phase P0 done in {time.monotonic()-t_start:.1f}s")
+    # Humans/age hints (not hard filters if we need recall)
+    humans_age = '(' + ' OR '.join([
+        'Humans[MeSH Terms]',
+        'adolescent[MeSH Terms]',
+        'adult[MeSH Terms]',
+        'adolescent[Title/Abstract]',
+        'adult[Title/Abstract]'
+    ]) + ')'
 
-        # ---- 2) Retrieval ----
-        log.info("Retrieval: esearch…")
-        pmid_set = set()
-        for name, q in criteria.boolean_queries.items():
-            ids = esearch(q, retmax=ESEARCH_RETMAX_PER_QUERY, mindate=criteria.picos.year_min)
-            pmid_set.update(ids)
-        pmids = list(pmid_set)
-        if max_records:
-            pmids = pmids[:max_records]
-            log.info(f"Dev cap: limiting to first {len(pmids)} records")
+    # Packs
+    if level == "strict":
+        return {
+            # title/abstract on both sides; this is usually enough and precise
+            "ta_strict": f'({pectus}) AND ({intercostal}) AND ({cryo}) AND {humans_age}',
+            # variant that allows “cryo*” without explicit intercostal mention
+            "ta_strict_no_intercostal": f'({pectus}) AND (cryo*[Title/Abstract]) AND {humans_age}',
+        }
 
-        log.info(f"Retrieval: efetch abstracts for {len(pmids)} PMIDs…")
-        meta = efetch_abstracts(pmids, workers=3, use_cache=True)
-        write_json(run_dir/"retrieval.json", {"pmids": pmids, "hits": len(meta)})
+    if level == "medium":
+        return {
+            # allow intercostal in any field; keep pectus in TA
+            "ta_medium": f'({pectus}) AND (("intercostal nerve"[All Fields] OR "intercostal nerves"[All Fields]) AND cryo*[All Fields])',
+            # allow cryo synonyms anywhere + pectus TA
+            "ta_medium_cryo_wide": f'({pectus}) AND (cryoablat*[All Fields] OR cryoanalges*[All Fields] OR cryoneurolys*[All Fields])',
+        }
 
-        docs = _to_docs(meta)
-        if not docs:
-            log.error("No records retrieved.")
-            raise typer.Exit(code=1)
-
-        # ---- 3) Embeddings & intent vector ----
-        log.info(f"Embedding {len(docs)} documents…")
-        emb, idx = build_embeddings(docs)
-        intent_vec = embed_texts([prompt])[0]
-
-        # ---- 4) Seeds S+ ----
-        tau = SEED_SEM_TAU_HI
-        seeds = [d.pmid for d in docs if is_primary_design(d) and (float(emb[idx[d.pmid]] @ intent_vec) >= tau)]
-        while len(seeds) < SEED_MIN_COUNT and tau > 0.80:
-            tau -= SEED_RELAX_STEP
-            seeds = [d.pmid for d in docs if is_primary_design(d) and (float(emb[idx[d.pmid]] @ intent_vec) >= tau)]
-        log.info(f"Seeds: {len(seeds)} at tau={tau:.2f}")
-
-        # ---- 5) CILE expansion (1 wave) ----
-        H0 = set(int(x) for x in seeds)
-        H1, meta_cile = one_wave_expand(
-            seeds_pos=[int(x) for x in seeds],
-            H_existing=H0,
-            rel_gate_frac=CILE_REL_GATE_FRAC,
-            external_budget=CILE_EXT_BUDGET,
-            max_accept=CILE_MAX_ACCEPT,
-            hub_quarantine_external=CILE_HUB_QUARANTINE,
-            min_hub_soft=CILE_MIN_HUB_SOFT
-        )
-        new_pmids = [str(x) for x in list(H1 - H0)]
-        if new_pmids:
-            log.info(f"CILE added {len(new_pmids)} new PMIDs; fetching their abstracts…")
-            extra = efetch_abstracts(new_pmids, workers=3, use_cache=True)
-            meta.update(extra)
-            docs = _to_docs(meta)
-            emb, idx = build_embeddings(docs)  # extend embedding matrix
-
-        # ---- 6) Signals ----
-        log.info("Computing signals…")
-        signals = compute_signals(docs, emb, idx, intent_vec, seeds, criteria.picos.year_min or year_min)
-
-        # ---- 7) Objective gates + 8) Regressor + 9) Model triage + 10) LLM ----
-        log.info("Screening…")
-        ledger: List[LedgerRow] = []
-        pool_for_model = []
-        for d in docs:
-            g = objective_gate(d, criteria.picos)
-            if g is not None:
-                reason_code, reason = g
-                row = LedgerRow(
-                    pmid=d.pmid, lane_before_llm="auto_exclude", gate_reason=reason,
-                    model_p=None, llm=None,
-                    final_decision="exclude", final_reason=reason,
-                    signals=signals[d.pmid], pub_types=d.pub_types, year=d.year,
-                    title=d.title, abstract=d.abstract
-                )
-                ledger.append(row)
-            else:
-                sig = signals[d.pmid]
-                if (is_primary_design(d) and sig.sem_intent >= 0.92 and (sig.graph_ppr_pct >= 90.0 or sig.graph_links_frac >= 0.20)):
-                    row = LedgerRow(
-                        pmid=d.pmid, lane_before_llm="auto_include", gate_reason=None,
-                        model_p=1.0, llm=None,
-                        final_decision="include", final_reason="insufficient_info",
-                        signals=sig, pub_types=d.pub_types, year=d.year,
-                        title=d.title, abstract=d.abstract
-                    )
-                    ledger.append(row)
-                else:
-                    pool_for_model.append(d)
-
-        import numpy as np
-        X_boot, y_boot = [], []
-        seed_set = set(seeds)
-        for d in docs:
-            sig = signals[d.pmid]
-            X_boot.append(featurize_row(sig, d))
-            y_boot.append(1 if d.pmid in seed_set else 0)
-        X_boot = np.stack(X_boot, axis=0); y_boot = np.array(y_boot, dtype="int64")
-        reg = OnlineRegressor()
-        reg.fit_bootstrap(X_boot, y_boot)
-
-        uncertain_docs = []
-        for d in pool_for_model:
-            p = float(reg.predict_proba(np.stack([featurize_row(signals[d.pmid], d)], axis=0))[0])
-            if p >= REG_P_HI:
-                ledger.append(LedgerRow(pmid=d.pmid, lane_before_llm="model_include", gate_reason=None, model_p=p, llm=None,
-                                        final_decision="include", final_reason="insufficient_info",
-                                        signals=signals[d.pmid], pub_types=d.pub_types, year=d.year, title=d.title, abstract=d.abstract))
-            elif p <= REG_P_LO:
-                ledger.append(LedgerRow(pmid=d.pmid, lane_before_llm="model_exclude", gate_reason="off_topic", model_p=p, llm=None,
-                                        final_decision="exclude", final_reason="off_topic",
-                                        signals=signals[d.pmid], pub_types=d.pub_types, year=d.year, title=d.title, abstract=d.abstract))
-            else:
-                uncertain_docs.append(d)
-
-        if uncertain_docs:
-            ps = []
-            for d in uncertain_docs:
-                p = float(reg.predict_proba(np.stack([featurize_row(signals[d.pmid], d)], axis=0))[0])
-                ps.append((d, abs(p - 0.5), p))
-            ps.sort(key=lambda t: t[1])
-            to_llm = [d for d,_,_ in ps[:llm_budget]]
-            llm_out = llm_decide_batch(criteria, to_llm, signals)
-            X_upd, y_upd = [], []
-            for dec in llm_out:
-                d = next(dd for dd in to_llm if dd.pmid == dec.pmid)
-                row = LedgerRow(
-                    pmid=d.pmid, lane_before_llm="sent_to_llm", gate_reason=None, model_p=None,
-                    llm=dec, final_decision=dec.decision,
-                    final_reason=dec.primary_reason,
-                    signals=signals[d.pmid], pub_types=d.pub_types, year=d.year,
-                    title=d.title, abstract=d.abstract
-                )
-                ledger.append(row)
-                if dec.decision == "include":
-                    X_upd.append(featurize_row(signals[d.pmid], d)); y_upd.append(1)
-                elif dec.decision == "exclude":
-                    X_upd.append(featurize_row(signals[d.pmid], d)); y_upd.append(0)
-            if X_upd:
-                reg.partial_update(np.stack(X_upd, axis=0), np.array(y_upd, dtype="int64"))
-            skipped = set(dd.pmid for dd,_,_ in ps[llm_budget:])
-            for d in uncertain_docs:
-                if d.pmid in skipped:
-                    ledger.append(LedgerRow(
-                        pmid=d.pmid, lane_before_llm="uncertain", gate_reason=None, model_p=None, llm=None,
-                        final_decision="borderline", final_reason="insufficient_info",
-                        signals=signals[d.pmid], pub_types=d.pub_types, year=d.year,
-                        title=d.title, abstract=d.abstract
-                    ))
-
-        # ---- 11) Outputs ----
-        fieldnames = ["pmid","lane_before_llm","gate_reason","model_p","final_decision","final_reason","year","pub_types","title","abstract"]
-        rows = []
-        for r in ledger:
-            rows.append({
-                "pmid": r.pmid,
-                "lane_before_llm": r.lane_before_llm,
-                "gate_reason": r.gate_reason or "",
-                "model_p": "" if r.model_p is None else f"{r.model_p:.3f}",
-                "final_decision": r.final_decision,
-                "final_reason": r.final_reason,
-                "year": r.year or "",
-                "pub_types": ";".join(r.pub_types),
-                "title": r.title.replace("\t"," ").replace("\n"," ").strip(),
-                "abstract": (r.abstract or "").replace("\t"," ").replace("\n"," ").strip(),
-            })
-        write_tsv(run_dir/"screening.tsv", rows, fieldnames)
-
-        from src.prisma.counts import prisma_counts
-        write_json(run_dir/"prisma.json", prisma_counts([r for r in ledger]))
-        write_json(run_dir/"cile.json", meta_cile)
-
-        log.info(f"Done in {time.monotonic()-t_start:.1f}s. Records: {len(docs)} | Ledger: {len(ledger)} | Out: {run_dir}")
-
-    except KeyboardInterrupt:
-        log.warning("Interrupted by user (Ctrl-C). Partial results saved where available.")
-        raise
+    # "loose"
+    return {
+        # keep core: pectus + cryo*; drop humans/age completely
+        "ta_loose_core": f'({pectus}) AND (cryo*[All Fields])',
+        # broad “Nuss AND cryo” anywhere
+        "nuss_cryo_any": '(Nuss[All Fields] AND cryo*[All Fields])',
+    }
 
 
 
@@ -605,6 +329,45 @@ def one_wave_expand(
 
 
 ###############################################################################
+### FILE: io/docdb.py
+###############################################################################
+from __future__ import annotations
+import sqlite3, pathlib, json
+from typing import Dict, List
+from src.config.defaults import DATA_DIR
+
+DB_PATH = pathlib.Path(DATA_DIR) / "cache" / "docs.sqlite3"
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+class DocDB:
+    def __init__(self, path: pathlib.Path = DB_PATH):
+        self.conn = sqlite3.connect(str(path))
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS docs(
+            pmid TEXT PRIMARY KEY,
+            json TEXT NOT NULL
+        )""")
+        self.conn.commit()
+
+    def get_many(self, pmids: List[str]) -> Dict[str, dict]:
+        if not pmids: return {}
+        q = ",".join("?"*len(pmids))
+        cur = self.conn.execute(f"SELECT pmid,json FROM docs WHERE pmid IN ({q})", pmids)
+        out = {}
+        for pmid, blob in cur.fetchall():
+            try: out[pmid] = json.loads(blob)
+            except Exception: pass
+        return out
+
+    def put_many(self, rows: Dict[str, dict]) -> int:
+        if not rows: return 0
+        data = [(pmid, json.dumps(rec)) for pmid, rec in rows.items()]
+        self.conn.executemany("INSERT OR REPLACE INTO docs(pmid,json) VALUES(?,?)", data)
+        self.conn.commit()
+        return len(data)
+
+
+
+###############################################################################
 ### FILE: io/store.py
 ###############################################################################
 from __future__ import annotations
@@ -631,6 +394,73 @@ def write_tsv(path: pathlib.Path, rows: List[Dict[str,Any]], fieldnames: List[st
 
 
 ###############################################################################
+### FILE: io/vecdb.py
+###############################################################################
+from __future__ import annotations
+import sqlite3, pathlib, hashlib
+from typing import Dict, List, Tuple, Optional
+import numpy as np
+from src.config.defaults import VEC_DB_PATH
+
+_PATH = pathlib.Path(VEC_DB_PATH)
+_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+def _hash_text(model: str, text: str) -> str:
+    h = hashlib.blake2b(digest_size=16)
+    h.update(model.encode("utf-8", "ignore") + b"\x00" + text.encode("utf-8", "ignore"))
+    return h.hexdigest()
+
+class VecDB:
+    def __init__(self, path: pathlib.Path = _PATH):
+        self.conn = sqlite3.connect(str(path))
+        self.conn.execute("""
+        CREATE TABLE IF NOT EXISTS embeds(
+          pmid TEXT NOT NULL,
+          model TEXT NOT NULL,
+          hash TEXT NOT NULL,
+          dim  INTEGER NOT NULL,
+          vec  BLOB NOT NULL,
+          PRIMARY KEY (pmid, model)
+        )""")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS ix_embeds_hash ON embeds(hash)")
+        self.conn.commit()
+
+    def get_many(self, keys: List[Tuple[str,str]]) -> Dict[Tuple[str,str], Tuple[str,int,bytes]]:
+        if not keys: return {}
+        q = ",".join(["(?,?)"]*len(keys))
+        flat = []
+        for pmid, model in keys: flat.extend([pmid, model])
+        cur = self.conn.execute(f"SELECT pmid,model,hash,dim,vec FROM embeds WHERE (pmid,model) IN ({q})", flat)
+        out = {}
+        for pmid, model, h, dim, blob in cur.fetchall():
+            out[(pmid, model)] = (h, int(dim), blob)
+        return out
+
+    def upsert_many(self, rows: List[Tuple[str,str,str,int,bytes]]) -> int:
+        if not rows: return 0
+        self.conn.executemany("INSERT OR REPLACE INTO embeds(pmid,model,hash,dim,vec) VALUES(?,?,?,?,?)", rows)
+        self.conn.commit()
+        return len(rows)
+
+    @staticmethod
+    def make_hash(model: str, text: str) -> str:
+        return _hash_text(model, text)
+
+    @staticmethod
+    def pack_vec(x: np.ndarray) -> bytes:
+        assert x.dtype == np.float32
+        return x.tobytes()
+
+    @staticmethod
+    def unpack_vec(blob: bytes, dim: int) -> np.ndarray:
+        arr = np.frombuffer(blob, dtype=np.float32)
+        if arr.size != dim:
+            raise ValueError(f"vec size {arr.size} != dim {dim}")
+        return arr
+
+
+
+###############################################################################
 ### FILE: net/entrez.py
 ###############################################################################
 from __future__ import annotations
@@ -643,6 +473,22 @@ from src.io.docdb import DocDB
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 log = logging.getLogger("entrez")
+
+# add near top of file (after imports)
+_LANG_MAP = {
+    "eng": "English", "en": "English", "english": "English",
+    "spa": "Spanish", "es": "Spanish", "spanish": "Spanish",
+    "por": "Portuguese", "pt": "Portuguese", "portuguese": "Portuguese",
+    "fra": "French", "fre": "French", "fr": "French", "french": "French",
+    "ger": "German", "deu": "German", "de": "German", "german": "German",
+    # extend as needed
+}
+
+def _norm_lang_name(s: str | None) -> str | None:
+    if not s:
+        return None
+    key = s.strip().lower()
+    return _LANG_MAP.get(key, s)
 
 def esearch(query: str, db: str = "pubmed", retmax: int = 10000, mindate: Optional[int]=None, maxdate: Optional[int]=None, sort: str="date") -> List[str]:
     params = {"db": db, "term": query, "retmode": "json", "retmax": retmax, "sort": sort, "email": ENTREZ_EMAIL}
@@ -677,7 +523,8 @@ def _parse_pubmed_xml(xml_text: str) -> Dict[str, Dict[str,Any]]:
         for idn in art.findall(".//ArticleIdList/ArticleId"):
             if (idn.attrib.get("IdType","").lower()=="doi") and idn.text:
                 doi = idn.text.strip().lower()
-        lang = art.findtext(".//Language") or None
+        lang_code = art.findtext(".//Language")
+        lang = _norm_lang_name(lang_code)
         out[pmid] = {"pmid": pmid, "title": title, "abstract": abstract, "year": year,
                      "journal": journal, "pub_types": pubtypes, "doi": doi, "language": lang}
     return out
@@ -960,11 +807,39 @@ from src.config.schema import Document, PICOS, Reason
 
 PRIMARY_TYPES = {"Randomized Controlled Trial","Clinical Trial","Cohort Studies","Case-Control Studies","Observational Study","Controlled Clinical Trial","Prospective Studies"}
 NON_PRIMARY_TYPES = {"Review","Meta-Analysis","Editorial","Letter","Comment","News","Case Reports","Guideline"}
+LANG_MAP = {
+    "eng": "English", "en": "English", "english": "English",
+    "spa": "Spanish", "es": "Spanish", "spanish": "Spanish",
+    "por": "Portuguese", "pt": "Portuguese", "portuguese": "Portuguese",
+}
+REV_LANG = {}
+
+for code_or_name, pretty in LANG_MAP.items():
+    REV_LANG.setdefault(pretty, set()).add(code_or_name)
+
+def _norm_lang(s: str | None) -> str | None:
+    if not s:
+        return None
+    return LANG_MAP.get(s.strip().lower(), s)
+
+def _lang_ok(doc_lang: str | None, allowed: list[str]) -> bool:
+    if not doc_lang or not allowed:
+        return True
+    dl = _norm_lang(doc_lang)
+    allowed_norm = {_norm_lang(a) or a for a in allowed}
+    if dl in allowed_norm:
+        return True
+    # also accept if doc code matches one of the allowed names
+    for a in allowed_norm:
+        for alias in REV_LANG.get(a, set()):
+            if doc_lang.strip().lower() == alias:
+                return True
+    return False
 
 def objective_gate(doc: Document, picos: PICOS) -> Optional[Tuple[str, Reason]]:
     if picos.year_min and doc.year is not None and doc.year < int(picos.year_min):
         return ("year", "year")
-    if picos.languages and doc.language and doc.language not in picos.languages:
+    if picos.languages and doc.language and not _lang_ok(doc.language, picos.languages):
         return ("language", "language")
     if (not (doc.title or "").strip()) and (not (doc.abstract or "").strip()):
         return ("insufficient_info", "insufficient_info")
@@ -980,15 +855,104 @@ def is_primary_design(doc: Document) -> bool:
 ###############################################################################
 ### FILE: screen/llm_decide.py
 ###############################################################################
+# src/screen/llm_decide.py
 from __future__ import annotations
-from typing import List
+from typing import List, Dict, Any
+import math
 from src.config.schema import Criteria, Document, DecisionLLM
 from src.text.llm import chat_json
 from src.text.prompts import P1_SYSTEM
 from src.screen.features import signal_card
 
+_ALLOWED = {
+    "design_mismatch","population_mismatch","intervention_mismatch",
+    "language","year","insufficient_info","off_topic"
+}
+
+# JSON Schema LM Studio can enforce (strict)
+DECISION_SCHEMA: Dict[str, Any] = {
+    "name": "decision",
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "pmid": {"type": "string"},
+            "decision": {"type": "string", "enum": ["include","exclude","borderline"]},
+            "primary_reason": {"type": "string", "enum": sorted(list(_ALLOWED))},
+            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "evidence": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "population_quote": {"type": "string"},
+                    "intervention_quote": {"type": "string"},
+                    "design_evidence": {"type": "string"},
+                    "notes": {"type": "string"}
+                },
+                "required": ["population_quote","intervention_quote","design_evidence","notes"]
+            }
+        },
+        "required": ["pmid","decision","primary_reason","confidence","evidence"]
+    }
+}
+
+def _norm_str(x: Any) -> str:
+    if x is None: return ""
+    s = str(x)
+    return s.strip()
+
+def _canonical_reason(txt: str) -> str:
+    t = _norm_str(txt).lower()
+    if t in _ALLOWED:
+        return t
+    # heuristic mapping from free-text to our enums
+    if any(k in t for k in ["observational", "cohort", "case-control", "registry", "review", "meta-"]):
+        return "design_mismatch"
+    if any(k in t for k in ["randomized", "rct", "trial design mismatch", "not randomized"]):
+        return "design_mismatch"
+    if any(k in t for k in ["population", "pediatric", "child", "children", "adult", "adolescent", "mismatch pop"]):
+        return "population_mismatch"
+    if any(k in t for k in ["intervention", "wrong treatment", "not cryoablation", "different procedure"]):
+        return "intervention_mismatch"
+    if "language" in t:
+        return "language"
+    if "year" in t or "date" in t or "older than" in t:
+        return "year"
+    if any(k in t for k in ["insufficient", "no abstract", "missing", "unclear"]):
+        return "insufficient_info"
+    if any(k in t for k in ["off-topic", "not relevant", "unrelated", "irrelevant"]):
+        return "off_topic"
+    # default bucket
+    return "off_topic"
+
+def _normalize_evidence(e: Any) -> Dict[str,str]:
+    if not isinstance(e, dict): e = {}
+    return {
+        "population_quote": _norm_str(e.get("population_quote", "")),
+        "intervention_quote": _norm_str(e.get("intervention_quote", "")),
+        "design_evidence": _norm_str(e.get("design_evidence", "")),
+        "notes": _norm_str(e.get("notes", "")),
+    }
+
+def _coerce_decision(js: Dict[str, Any]) -> DecisionLLM:
+    pmid = _norm_str(js.get("pmid", ""))
+    decision = _norm_str(js.get("decision", "")).lower()
+    if decision not in {"include","exclude","borderline"}:
+        # weak fallback
+        decision = "borderline"
+    reason = _canonical_reason(js.get("primary_reason",""))
+    # keep in [0,1]
+    try:
+        conf = float(js.get("confidence", 0.5))
+        if not math.isfinite(conf): conf = 0.5
+    except Exception:
+        conf = 0.5
+    conf = max(0.0, min(1.0, conf))
+    ev = _normalize_evidence(js.get("evidence", {}))
+    return DecisionLLM(pmid=pmid, decision=decision, primary_reason=reason, confidence=conf, evidence=ev)
+
 def llm_decide_batch(criteria: Criteria, docs: List[Document], signals_map: dict, temperature: float = 0.1) -> List[DecisionLLM]:
-    out = []
+    out: List[DecisionLLM] = []
     for d in docs:
         sig = signals_map[d.pmid]
         user = (
@@ -997,8 +961,17 @@ def llm_decide_batch(criteria: Criteria, docs: List[Document], signals_map: dict
             f"{signal_card(sig)}\n"
             "Return the JSON now."
         )
-        resp = chat_json(P1_SYSTEM, user, temperature=temperature, max_tokens=600)
-        out.append(DecisionLLM(**resp))
+        # 1) Try with schema (strict)
+        try:
+            raw = chat_json(P1_SYSTEM, user, temperature=temperature, max_tokens=600, schema=DECISION_SCHEMA)
+            out.append(_coerce_decision(raw))
+            continue
+        except Exception:
+            pass
+
+        # 2) Fall back to plain JSON with retries/repair inside chat_json
+        raw = chat_json(P1_SYSTEM, user, temperature=0.0, max_tokens=600, schema=None)
+        out.append(_coerce_decision(raw))
     return out
 
 
@@ -1237,9 +1210,10 @@ def embed_docs_with_cache(pmids: List[str], texts: List[str], model: Optional[st
 ###############################################################################
 ### FILE: text/llm.py
 ###############################################################################
+# src/text/llm.py
 from __future__ import annotations
-import json, re, requests
-from typing import Optional
+import json, re, requests, time
+from typing import Optional, Dict, Any
 from src.config.defaults import LMSTUDIO_BASE, LMSTUDIO_CHAT, HTTP_TIMEOUT, USER_AGENT
 
 HEADERS = {"Content-Type":"application/json","User-Agent":USER_AGENT}
@@ -1247,84 +1221,147 @@ HEADERS = {"Content-Type":"application/json","User-Agent":USER_AGENT}
 _FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9]*\s*|\s*```\s*$", re.M)
 
 def _strip_md_fences(s: str) -> str:
-    # remove ```json fences anywhere
     return _FENCE_RE.sub("", s).strip()
 
 def _extract_json_block(text: str) -> str:
-    # grab the first {...} block greedily; fallback to [...] if needed
     m = re.search(r"\{[\s\S]*\}", text)
     if m: return m.group(0)
     m = re.search(r"\[[\s\S]*\]", text)
     if m: return m.group(0)
-    # if nothing obvious, assume whole text is meant to be JSON
     return text.strip()
 
 def _quick_sanitize(js: str) -> str:
     s = js
-    # normalize smart quotes → plain
     s = s.replace("\u201c", '"').replace("\u201d", '"').replace("\u2018", "'").replace("\u2019", "'")
-    # remove trailing commas before } or ]
     s = re.sub(r",\s*(\}|\])", r"\1", s)
-    # remove stray backticks just in case
     s = s.replace("```", "")
     return s
 
-def _repair_json_via_llm(bad: str) -> str:
+def _post_chat(body: dict) -> str:
     url = f"{LMSTUDIO_BASE.rstrip('/')}/v1/chat/completions"
+    r = requests.post(url, headers=HEADERS, json=body, timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
+
+def _repair_json_via_llm(bad: str) -> str:
+    # Last-ditch fixer: rewrite as strict JSON
     system = (
         "You are a JSON fixer. Convert the given content into STRICT, VALID JSON.\n"
         "Rules:\n"
-        "- Use only double quotes for keys and string values.\n"
-        "- Escape ALL internal double quotes inside string values (e.g., boolean query strings with phrases).\n"
-        "- Do NOT include markdown fences. No comments. No trailing commas.\n"
-        "- Keep the same keys/structure if present: picos, inclusion_criteria, exclusion_criteria, reason_taxonomy, boolean_queries.\n"
+        "- Use only double-quoted keys and values.\n"
+        "- Escape internal quotes inside strings.\n"
+        "- No markdown, no comments, no trailing commas.\n"
+        "- Keep existing keys if present.\n"
         "Return JSON ONLY."
     )
-    user = f"BAD_JSON:\n{bad}"
     body = {
         "model": LMSTUDIO_CHAT,
-        "messages": [{"role":"system","content":system},{"role":"user","content":user}],
+        "messages": [{"role":"system","content":system},{"role":"user","content":bad}],
         "temperature": 0.0,
         "max_tokens": 900,
         "stream": False
     }
-    r = requests.post(url, headers=HEADERS, json=body, timeout=HTTP_TIMEOUT)
-    r.raise_for_status()
-    content = r.json()["choices"][0]["message"]["content"]
+    content = _post_chat(body)
     content = _strip_md_fences(content)
     repaired = _extract_json_block(content)
     repaired = _quick_sanitize(repaired)
     return repaired
 
-def chat_json(system: str, user: str, temperature: float = 0.1, max_tokens: int = 700) -> dict:
-    url = f"{LMSTUDIO_BASE.rstrip('/')}/v1/chat/completions"
-    body = {
+def _mk_schema_response_format(schema: dict) -> dict:
+    # LM Studio supports JSON Schema with strict mode
+    # https://lmstudio.ai/docs/guides/structured-output
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema.get("name", "payload"),
+            "schema": schema["schema"],
+            "strict": True
+        }
+    }
+
+def chat_json(
+    system: str,
+    user: str,
+    temperature: float = 0.1,
+    max_tokens: int = 700,
+    schema: Optional[dict] = None,
+    retries: int = 2
+) -> dict:
+    """
+    Try 1: JSON Schema (strict) if provided.
+    Try 2: response_format=json_object (plain JSON mode).
+    Try 3: re-ask with stricter system "JSON ONLY".
+    Try 4: string-repair via fixer LLM.
+    """
+    # --- Attempt 1: schema (if provided)
+    if schema is not None:
+        body = {
+            "model": LMSTUDIO_CHAT,
+            "messages": [{"role":"system","content":system},{"role":"user","content":user}],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+            "response_format": _mk_schema_response_format(schema),
+        }
+        try:
+            content = _post_chat(body)
+            raw = _quick_sanitize(_extract_json_block(_strip_md_fences(content)))
+            return json.loads(raw)
+        except Exception:
+            # fall through to next attempts
+            pass
+
+    # --- Attempt 2: json_object mode
+    body2 = {
         "model": LMSTUDIO_CHAT,
         "messages": [{"role":"system","content":system},{"role":"user","content":user}],
         "temperature": temperature,
         "max_tokens": max_tokens,
+        "stream": False,
+        "response_format": {"type": "json_object"}  # usually supported; if not, server ignores
+    }
+    try:
+        content = _post_chat(body2)
+        raw = _quick_sanitize(_extract_json_block(_strip_md_fences(content)))
+        return json.loads(raw)
+    except Exception:
+        pass
+
+    # --- Attempt 3: re-ask with an ultra-strict system prompt
+    strict_system = (
+        "Return STRICT JSON only. No prose. No markdown. No trailing commas. "
+        "If an enum is requested, ONLY use one of the allowed values."
+    )
+    body3 = {
+        "model": LMSTUDIO_CHAT,
+        "messages": [
+            {"role":"system","content":strict_system + "\n\n" + system},
+            {"role":"user","content":user}
+        ],
+        "temperature": 0.0,
+        "max_tokens": max_tokens,
         "stream": False
     }
-    r = requests.post(url, headers=HEADERS, json=body, timeout=HTTP_TIMEOUT)
-    r.raise_for_status()
-    content = r.json()["choices"][0]["message"]["content"]
-
-    # 1) strip fences, 2) extract JSON-ish block, 3) sanitize, 4) parse
-    raw = _strip_md_fences(content)
-    js = _extract_json_block(raw)
-    js = _quick_sanitize(js)
-
     try:
-        return json.loads(js)
+        content = _post_chat(body3)
+        raw = _quick_sanitize(_extract_json_block(_strip_md_fences(content)))
+        return json.loads(raw)
     except Exception:
-        # One repair attempt via LLM
-        try:
-            repaired = _repair_json_via_llm(js)
-            return json.loads(repaired)
-        except Exception as e:
-            # Print a short snippet to help debug
-            snippet = js[:500]
-            raise ValueError(f"Could not parse LLM JSON after repair. Snippet:\n{snippet}\nError: {e}")
+        pass
+
+    # --- Attempt 4: repair whatever we got from attempt 2/3 if any, else from the user prompt echo
+    # Re-run the best-effort request once and try repair
+    try:
+        content = _post_chat(body2)
+    except Exception:
+        content = _post_chat(body3)
+
+    raw = _quick_sanitize(_extract_json_block(_strip_md_fences(content)))
+    try:
+        return json.loads(raw)
+    except Exception:
+        repaired = _repair_json_via_llm(raw)
+        return json.loads(repaired)
 
 
 

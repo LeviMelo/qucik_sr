@@ -4,7 +4,6 @@
   "excluded": 300,
   "borderline": 0,
   "exclusions_by_reason": {
-    "language": 299,
-    "year": 1
+    "language": 300
   }
 }

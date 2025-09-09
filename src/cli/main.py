@@ -1,6 +1,8 @@
 from __future__ import annotations
 import sys, os, json, typer, time, logging
 from typing import List, Dict
+from collections import Counter
+
 from src.config.defaults import (
     ESEARCH_RETMAX_PER_QUERY, SEED_SEM_TAU_HI, SEED_MIN_COUNT, SEED_RELAX_STEP,
     CILE_REL_GATE_FRAC, CILE_EXT_BUDGET, CILE_MAX_ACCEPT, CILE_HUB_QUARANTINE, CILE_MIN_HUB_SOFT,
@@ -24,6 +26,44 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 log = logging.getLogger("cli")
+
+# --- Helpers for robust retrieval ---
+def _empty_or_blank_queries(qdict: Dict[str, str] | None) -> bool:
+    if not qdict:
+        return True
+    for v in qdict.values():
+        if isinstance(v, str) and v.strip():
+            return False
+    return True
+
+def _fallback_boolean_queries() -> Dict[str, str]:
+    """
+    Conservative but targeted PubMed TA query for:
+    - Pectus excavatum / Nuss / MIRPE
+    - Intercostal cryoablation / cryoanalgesia / cryoneurolysis
+    - Humans + primary-ish designs
+    Year filter is applied via esearch(mindate=...), so not in the string.
+    """
+    ta_pectus = '("pectus excavatum"[Title/Abstract] OR Nuss[Title/Abstract] OR "minimally invasive repair"[Title/Abstract] OR MIRPE[Title/Abstract])'
+    ta_cryo   = '(cryoablat*[Title/Abstract] OR cryoanalges*[Title/Abstract] OR cryoneurolys*[Title/Abstract] OR (("intercostal nerve"[Title/Abstract]) AND cryo*[Title/Abstract]))'
+    humans    = 'Humans[MeSH Terms]'
+    designs   = '(' + ' OR '.join([
+        '"Randomized Controlled Trial"[Publication Type]',
+        '"Controlled Clinical Trial"[Publication Type]',
+        '"Clinical Trial"[Publication Type]',
+        '"Observational Study"[Publication Type]',
+        '"Cohort Studies"[MeSH Terms]',
+        '"Case-Control Studies"[MeSH Terms]',
+        '"Prospective Studies"[MeSH Terms]',
+    ]) + ')'
+    base = f'({ta_pectus}) AND ({ta_cryo}) AND {humans} AND {designs}'
+    # you can add a looser variant too if you want recall:
+    alt  = f'({ta_pectus}) AND cryo*[Title/Abstract] AND {humans}'
+    return {
+        "title_abstract_strict": base,
+        "title_abstract_loose": alt,
+    }
+
 
 app = typer.Typer(add_completion=False)
 
@@ -69,18 +109,49 @@ def run(prompt: str = typer.Argument(..., help="Topic intent / preferences parag
 
         # ---- 2) Retrieval ----
         log.info("Retrieval: esearch…")
-        pmid_set = set()
+
+        # Guard: some LLM runs omit boolean_queries → use a robust fallback
+        if _empty_or_blank_queries(criteria.boolean_queries):
+            log.warning("P0 returned no usable boolean_queries; injecting deterministic fallback query.")
+            criteria.boolean_queries = _fallback_boolean_queries()
+            # persist the patched criteria so you can audit later
+            write_json(run_dir/"criteria.patched.json", criteria.model_dump())
+
+        # Log summaries of the queries we will actually run
+        log.info(f"P0 boolean_queries count: {len(criteria.boolean_queries)}")
         for name, q in criteria.boolean_queries.items():
-            ids = esearch(q, retmax=ESEARCH_RETMAX_PER_QUERY, mindate=criteria.picos.year_min)
-            pmid_set.update(ids)
+            snip = (q or "").strip().replace("\n", " ")
+            if len(snip) > 180:
+                snip = snip[:180] + " …"
+            log.info(f"  {name}: {snip}")
+
+        pmid_set = set()
+        q_stats = []
+        for name, q in criteria.boolean_queries.items():
+            if not q or not str(q).strip():
+                log.warning(f"Skipping empty boolean query: {name}")
+                continue
+            try:
+                ids = esearch(q, retmax=ESEARCH_RETMAX_PER_QUERY, mindate=criteria.picos.year_min)
+                pmid_set.update(ids)
+                q_stats.append({"name": name, "hits": len(ids)})
+            except Exception as e:
+                log.warning(f"esearch failed for {name}: {e}")
+
         pmids = list(pmid_set)
-        if max_records:
+        if max_records and len(pmids) > max_records:
             pmids = pmids[:max_records]
             log.info(f"Dev cap: limiting to first {len(pmids)} records")
 
         log.info(f"Retrieval: efetch abstracts for {len(pmids)} PMIDs…")
         meta = efetch_abstracts(pmids, workers=3, use_cache=True)
-        write_json(run_dir/"retrieval.json", {"pmids": pmids, "hits": len(meta)})
+        write_json(run_dir/"retrieval.json", {
+            "queries": criteria.boolean_queries,
+            "query_stats": q_stats,
+            "pmids": pmids,
+            "hits": len(meta)
+        })
+        log.info(f"Query stats: {q_stats}")
 
         docs = _to_docs(meta)
         if not docs:
@@ -92,13 +163,19 @@ def run(prompt: str = typer.Argument(..., help="Topic intent / preferences parag
         emb, idx = build_embeddings(docs)
         intent_vec = embed_texts([prompt])[0]
 
-        # ---- 4) Seeds S+ ----
+        # ---- 4) Seeds S+ (relax tau, then one-time fallback if still too few) ----
         tau = SEED_SEM_TAU_HI
         seeds = [d.pmid for d in docs if is_primary_design(d) and (float(emb[idx[d.pmid]] @ intent_vec) >= tau)]
         while len(seeds) < SEED_MIN_COUNT and tau > 0.80:
             tau -= SEED_RELAX_STEP
             seeds = [d.pmid for d in docs if is_primary_design(d) and (float(emb[idx[d.pmid]] @ intent_vec) >= tau)]
-        log.info(f"Seeds: {len(seeds)} at tau={tau:.2f}")
+        if len(seeds) < SEED_MIN_COUNT:
+            primaries = [d for d in docs if is_primary_design(d)]
+            primaries.sort(key=lambda d: float(emb[idx[d.pmid]] @ intent_vec), reverse=True)
+            k = min(max(5, SEED_MIN_COUNT), len(primaries))
+            seeds = [d.pmid for d in primaries[:k]]
+            log.info(f"Seed fallback → using top-{len(seeds)} semantic primaries")
+        log.info(f"Seeds established: {len(seeds)} (tau_final={tau:.2f})")
 
         # ---- 5) CILE expansion (1 wave) ----
         H0 = set(int(x) for x in seeds)
@@ -123,36 +200,56 @@ def run(prompt: str = typer.Argument(..., help="Topic intent / preferences parag
         log.info("Computing signals…")
         signals = compute_signals(docs, emb, idx, intent_vec, seeds, criteria.picos.year_min or year_min)
 
-        # ---- 7) Objective gates + 8) Regressor + 9) Model triage + 10) LLM ----
+        # ---- 7–10) Screening pipeline ----
         log.info("Screening…")
         ledger: List[LedgerRow] = []
-        pool_for_model = []
+        pool_for_model: List[Document] = []
+        gate_counts = Counter()
+
+        # 7) Objective gates (+ auto_include path)
         for d in docs:
             g = objective_gate(d, criteria.picos)
             if g is not None:
                 reason_code, reason = g
-                row = LedgerRow(
+                gate_counts[reason] += 1
+                ledger.append(LedgerRow(
                     pmid=d.pmid, lane_before_llm="auto_exclude", gate_reason=reason,
                     model_p=None, llm=None,
                     final_decision="exclude", final_reason=reason,
                     signals=signals[d.pmid], pub_types=d.pub_types, year=d.year,
                     title=d.title, abstract=d.abstract
-                )
-                ledger.append(row)
+                ))
             else:
                 sig = signals[d.pmid]
                 if (is_primary_design(d) and sig.sem_intent >= 0.92 and (sig.graph_ppr_pct >= 90.0 or sig.graph_links_frac >= 0.20)):
-                    row = LedgerRow(
+                    ledger.append(LedgerRow(
                         pmid=d.pmid, lane_before_llm="auto_include", gate_reason=None,
                         model_p=1.0, llm=None,
                         final_decision="include", final_reason="insufficient_info",
                         signals=sig, pub_types=d.pub_types, year=d.year,
                         title=d.title, abstract=d.abstract
-                    )
-                    ledger.append(row)
+                    ))
                 else:
                     pool_for_model.append(d)
 
+        # Safety valve: if gates consumed everything, still send some to LLM
+        if not pool_for_model:
+            survivors = [d for d in docs if all(r.pmid != d.pmid for r in ledger)]
+            if survivors:
+                survivors.sort(key=lambda d: float(emb[idx[d.pmid]] @ intent_vec), reverse=True)
+                to_llm = survivors[:min(llm_budget, len(survivors))]
+                log.warning(f"No pool_for_model after gates; forcing LLM pass on {len(to_llm)} best semantic candidates.")
+                llm_out = llm_decide_batch(criteria, to_llm, signals)
+                for dec in llm_out:
+                    d = next(dd for dd in to_llm if dd.pmid == dec.pmid)
+                    ledger.append(LedgerRow(
+                        pmid=d.pmid, lane_before_llm="sent_to_llm", gate_reason=None, model_p=None,
+                        llm=dec, final_decision=dec.decision, final_reason=dec.primary_reason,
+                        signals=signals[d.pmid], pub_types=d.pub_types, year=d.year,
+                        title=d.title, abstract=d.abstract
+                    ))
+
+        # 8) Regressor bootstrap (guard single-class)
         import numpy as np
         X_boot, y_boot = [], []
         seed_set = set(seeds)
@@ -162,9 +259,22 @@ def run(prompt: str = typer.Argument(..., help="Topic intent / preferences parag
             y_boot.append(1 if d.pmid in seed_set else 0)
         X_boot = np.stack(X_boot, axis=0); y_boot = np.array(y_boot, dtype="int64")
         reg = OnlineRegressor()
+
+        unique = set(y_boot.tolist())
+        if len(unique) < 2:
+            log.warning("Bootstrap labels have a single class; warm-starting with synthetic pos/neg from semantic ranks.")
+            scores = [(d, float(emb[idx[d.pmid]] @ intent_vec)) for d in docs]
+            scores.sort(key=lambda t: t[1], reverse=True)
+            k = max(20, len(scores) // 10)
+            pos = [featurize_row(signals[d.pmid], d) for d,_ in scores[:k]]
+            neg = [featurize_row(signals[d.pmid], d) for d,_ in scores[-k:]]
+            X_boot = np.stack(pos + neg, axis=0)
+            y_boot = np.array([1]*len(pos) + [0]*len(neg), dtype="int64")
+
         reg.fit_bootstrap(X_boot, y_boot)
 
-        uncertain_docs = []
+        # 9) Model triage → hi/lo auto, mid → uncertain
+        uncertain_docs: List[Document] = []
         for d in pool_for_model:
             p = float(reg.predict_proba(np.stack([featurize_row(signals[d.pmid], d)], axis=0))[0])
             if p >= REG_P_HI:
@@ -178,6 +288,7 @@ def run(prompt: str = typer.Argument(..., help="Topic intent / preferences parag
             else:
                 uncertain_docs.append(d)
 
+        # 10) Spend LLM budget: uncertain first, else top candidates
         if uncertain_docs:
             ps = []
             for d in uncertain_docs:
@@ -189,29 +300,43 @@ def run(prompt: str = typer.Argument(..., help="Topic intent / preferences parag
             X_upd, y_upd = [], []
             for dec in llm_out:
                 d = next(dd for dd in to_llm if dd.pmid == dec.pmid)
-                row = LedgerRow(
+                ledger.append(LedgerRow(
                     pmid=d.pmid, lane_before_llm="sent_to_llm", gate_reason=None, model_p=None,
                     llm=dec, final_decision=dec.decision,
                     final_reason=dec.primary_reason,
                     signals=signals[d.pmid], pub_types=d.pub_types, year=d.year,
                     title=d.title, abstract=d.abstract
-                )
-                ledger.append(row)
+                ))
                 if dec.decision == "include":
                     X_upd.append(featurize_row(signals[d.pmid], d)); y_upd.append(1)
                 elif dec.decision == "exclude":
                     X_upd.append(featurize_row(signals[d.pmid], d)); y_upd.append(0)
             if X_upd:
                 reg.partial_update(np.stack(X_upd, axis=0), np.array(y_upd, dtype="int64"))
-            skipped = set(dd.pmid for dd,_,_ in ps[llm_budget:])
-            for d in uncertain_docs:
-                if d.pmid in skipped:
+        else:
+            # No uncertain docs → still spend LLM budget on highest-priority candidates
+            candidates = [d for d in pool_for_model if is_primary_design(d)] or pool_for_model
+            candidates.sort(key=lambda d: (signals[d.pmid].sem_intent + 0.2*signals[d.pmid].graph_links_frac), reverse=True)
+            to_llm = candidates[:min(llm_budget, len(candidates))]
+            if to_llm:
+                log.info(f"Forcing LLM pass on top-{len(to_llm)} candidates (no uncertain docs).")
+                llm_out = llm_decide_batch(criteria, to_llm, signals)
+                X_upd, y_upd = [], []
+                for dec in llm_out:
+                    d = next(dd for dd in to_llm if dd.pmid == dec.pmid)
                     ledger.append(LedgerRow(
-                        pmid=d.pmid, lane_before_llm="uncertain", gate_reason=None, model_p=None, llm=None,
-                        final_decision="borderline", final_reason="insufficient_info",
+                        pmid=d.pmid, lane_before_llm="sent_to_llm", gate_reason=None, model_p=None,
+                        llm=dec, final_decision=dec.decision,
+                        final_reason=dec.primary_reason,
                         signals=signals[d.pmid], pub_types=d.pub_types, year=d.year,
                         title=d.title, abstract=d.abstract
                     ))
+                    if dec.decision == "include":
+                        X_upd.append(featurize_row(signals[d.pmid], d)); y_upd.append(1)
+                    elif dec.decision == "exclude":
+                        X_upd.append(featurize_row(signals[d.pmid], d)); y_upd.append(0)
+                if X_upd:
+                    reg.partial_update(np.stack(X_upd, axis=0), np.array(y_upd, dtype="int64"))
 
         # ---- 11) Outputs ----
         fieldnames = ["pmid","lane_before_llm","gate_reason","model_p","final_decision","final_reason","year","pub_types","title","abstract"]
@@ -231,10 +356,17 @@ def run(prompt: str = typer.Argument(..., help="Topic intent / preferences parag
             })
         write_tsv(run_dir/"screening.tsv", rows, fieldnames)
 
+        # prisma + cile meta
         from src.prisma.counts import prisma_counts
         write_json(run_dir/"prisma.json", prisma_counts([r for r in ledger]))
         write_json(run_dir/"cile.json", meta_cile)
 
+        # audit logs
+        lanes = Counter(r.lane_before_llm for r in ledger)
+        decisions = Counter(r.final_decision for r in ledger)
+        log.info(f"Gates (auto_exclude reasons): {dict(gate_counts)}")
+        log.info(f"Lanes summary: {dict(lanes)}")
+        log.info(f"Decisions: {dict(decisions)}")
         log.info(f"Done in {time.monotonic()-t_start:.1f}s. Records: {len(docs)} | Ledger: {len(ledger)} | Out: {run_dir}")
 
     except KeyboardInterrupt:
@@ -242,4 +374,8 @@ def run(prompt: str = typer.Argument(..., help="Topic intent / preferences parag
         raise
 
 if __name__ == "__main__":
+    # compatibility shim: allow "… run <args>" when we only have one command
+    import sys as _sys
+    if len(_sys.argv) > 1 and _sys.argv[1] == "run":
+        _sys.argv.pop(1)
     app()

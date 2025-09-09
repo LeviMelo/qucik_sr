@@ -9,6 +9,22 @@ EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 log = logging.getLogger("entrez")
 
+# add near top of file (after imports)
+_LANG_MAP = {
+    "eng": "English", "en": "English", "english": "English",
+    "spa": "Spanish", "es": "Spanish", "spanish": "Spanish",
+    "por": "Portuguese", "pt": "Portuguese", "portuguese": "Portuguese",
+    "fra": "French", "fre": "French", "fr": "French", "french": "French",
+    "ger": "German", "deu": "German", "de": "German", "german": "German",
+    # extend as needed
+}
+
+def _norm_lang_name(s: str | None) -> str | None:
+    if not s:
+        return None
+    key = s.strip().lower()
+    return _LANG_MAP.get(key, s)
+
 def esearch(query: str, db: str = "pubmed", retmax: int = 10000, mindate: Optional[int]=None, maxdate: Optional[int]=None, sort: str="date") -> List[str]:
     params = {"db": db, "term": query, "retmode": "json", "retmax": retmax, "sort": sort, "email": ENTREZ_EMAIL}
     if ENTREZ_API_KEY: params["api_key"] = ENTREZ_API_KEY
@@ -17,6 +33,20 @@ def esearch(query: str, db: str = "pubmed", retmax: int = 10000, mindate: Option
     r = requests.get(f"{EUTILS}/esearch.fcgi", headers=HEADERS, params=params, timeout=HTTP_TIMEOUT)
     r.raise_for_status()
     return r.json().get("esearchresult", {}).get("idlist", [])
+
+# --- NEW: add a light esearch_count probe ------------------------------
+def esearch_count(query: str, db: str = "pubmed", mindate: Optional[int]=None, maxdate: Optional[int]=None) -> int:
+    """
+    Return only the total hit count for a query (fast probe).
+    """
+    params = {"db": db, "term": query, "retmode": "json", "retmax": 0, "email": ENTREZ_EMAIL}
+    if ENTREZ_API_KEY: params["api_key"] = ENTREZ_API_KEY
+    if mindate: params["mindate"] = str(mindate)
+    if maxdate: params["maxdate"] = str(maxdate)
+    r = requests.get(f"{EUTILS}/esearch.fcgi", headers=HEADERS, params=params, timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    return int(r.json().get("esearchresult", {}).get("count", "0"))
+
 
 def _parse_pubmed_xml(xml_text: str) -> Dict[str, Dict[str,Any]]:
     out: Dict[str,Dict[str,Any]] = {}
@@ -42,7 +72,8 @@ def _parse_pubmed_xml(xml_text: str) -> Dict[str, Dict[str,Any]]:
         for idn in art.findall(".//ArticleIdList/ArticleId"):
             if (idn.attrib.get("IdType","").lower()=="doi") and idn.text:
                 doi = idn.text.strip().lower()
-        lang = art.findtext(".//Language") or None
+        lang_code = art.findtext(".//Language")
+        lang = _norm_lang_name(lang_code)
         out[pmid] = {"pmid": pmid, "title": title, "abstract": abstract, "year": year,
                      "journal": journal, "pub_types": pubtypes, "doi": doi, "language": lang}
     return out
@@ -109,3 +140,5 @@ def efetch_abstracts(pmids: Iterable[str], chunk_size: int = 200, workers: int =
         cache.put_many(results)
 
     return have
+
+
