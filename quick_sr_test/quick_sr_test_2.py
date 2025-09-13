@@ -891,9 +891,9 @@ def merge_and_handoff():
 
     # read candidates for evidence
     frames=[]
-    if os.path.exists(c1):
+    if os.path.exists(c1) and os.path.getsize(c1) > 0:
         frames.append(pd.read_csv(c1))
-    if os.path.exists(c2):
+    if os.path.exists(c2) and os.path.getsize(c2) > 0:
         frames.append(pd.read_csv(c2))
     if frames:
         cand = pd.concat(frames, ignore_index=True)
@@ -913,7 +913,7 @@ def merge_and_handoff():
         for _, r in triage_master.iterrows():
             handoff_rows.append({
                 "PMID": int(r["pmid"]),
-                "Year": int(r["year"]) if not math.isnan(r["year"]) else "",
+                "Year": (int(r["year"]) if (str(r["year"]).isdigit() and 1500 <= int(r["year"]) <= 2100) else ""),
                 "FirstAuthor": r.get("first_author") or "",
                 "Title": r.get("title") or "",
                 "DOI": r.get("doi") or ""
@@ -929,35 +929,6 @@ def merge_and_handoff():
 # As with CILE_SRC, paste the entire fetcher script (verbatim) into FETCHER_SRC.
 # It has been trimmed here purely due to message size constraints.
 #again, not needed anymore. full text script lives in it's own py file.
-
-def _run_fetcher_with_csv(handoff_csv_path: str, pdf_out_dir: str):
-    """
-    Execute the provided fetcher module as-is, with a scoped override that:
-    - Sets EXCEL_FILE_PATH to our CSV path
-    - Sets OUTPUT_PDF_DIR to desired output directory
-    - Disables Excel usage by overriding pd.read_excel to read CSV instead
-    - Blocks pd.ExcelFile
-    """
-    import types
-    import pandas as pd
-    ft = types.ModuleType("fulltext_fetcher_v4")
-    exec(FETCHER_SRC, ft.__dict__)
-    # point to our CSV and output dir
-    ft.EXCEL_FILE_PATH = handoff_csv_path
-    ft.OUTPUT_PDF_DIR = pdf_out_dir
-
-    # Scoped overrides
-    def _read_excel_csv_shim(path, *a, **k):
-        # read our CSV and provide DataFrame with expected columns
-        return pd.read_csv(path)
-    ft.pd.read_excel = _read_excel_csv_shim
-    # harden against alternative Excel paths
-    def _excelfile_blocker(*a, **k):
-        raise RuntimeError("Excel disabled in this integration")
-    ft.pd.ExcelFile = _excelfile_blocker
-
-    # run
-    ft.main()
 
 # ----------------------------
 # FULL-TEXT extraction + final LLM screen
@@ -1002,7 +973,18 @@ def fulltext_screen(proto: Protocol):
 
     # run fetcher (as-is) against our CSV (Sci-Hub gated by env in _run_fetcher_with_csv)
     handoff = os.path.join(OUTDIR, "final_fulltext_handoff.csv")
-    _run_fetcher_with_csv(handoff, pdf_dir)
+    try:
+        # Preferred signature (library-only fetcher)
+        attempt_oa_downloads(
+            handoff_csv_path=handoff,
+            output_dir=pdf_dir,
+            min_pdf_bytes=1000,           # keep 1KB guard (intended behavior)
+            ncbi_api_key=NCBI_API_KEY,
+            contact_email=NCBI_EMAIL
+        )
+    except TypeError:
+        # Fallback for older signature
+        attempt_oa_downloads(handoff, pdf_dir, ncbi_api_key=NCBI_API_KEY)
 
     # collect PDFs and map by PMID from handoff
     df = pd.read_csv(handoff)
@@ -1021,6 +1003,43 @@ def fulltext_screen(proto: Protocol):
                 "FirstAuthor": str(r["FirstAuthor"] or ""),
                 "DOI": str(r["DOI"] or ""),
             }
+            
+    # after you build final_full_text_handoff.csv (27 PMIDs in your run),
+    # add a fetch log collecting per-PMID status
+
+    handoff_csv = os.path.join(OUTDIR, "final_full_text_handoff.csv")
+    _fetch_log = []
+    if os.path.exists(handoff_csv):
+        import csv as _csv
+        with open(handoff_csv, newline='', encoding='utf-8') as _f:
+            rows = list(_csv.DictReader(_f))
+        pmids = [int(r["pmid"]) for r in rows if str(r.get("pmid","")).isdigit()]
+
+        # Replace the following block with your actual fetcher calls,
+        # but ALWAYS append a status row per PMID.
+        for p in pmids:
+            status = {
+                "pmid": p,
+                "found_pmcid": False,
+                "found_doi": False,
+                "oa_source": "",
+                "pdf_saved": False,
+                "error": ""
+            }
+            try:
+                # (A) try NCBI linkout → PMCID
+                # status["found_pmcid"] = ...
+                # (B) try DOI → Unpaywall (needs email)
+                # status["found_doi"] = ...
+                # status["oa_source"] = "pmc"|"unpaywall"|"publisher"|"scihub_disabled"
+                # status["pdf_saved"] = True/False
+                pass
+            except Exception as e:
+                status["error"] = f"{e.__class__.__name__}: {e}"
+            _fetch_log.append(status)
+
+        write_csv(os.path.join(OUTDIR, "fulltext_fetch_results.csv"),
+                list(_fetch_log[0].keys()) if _fetch_log else ["pmid","status"], _fetch_log)
 
     # Final screen
     curated = _load_curated_for_fulltext()
@@ -1148,71 +1167,82 @@ def run_pipeline(protocol_path: str):
     screen_tiab(proto, curated1, "triage_stage1_candidates.csv", "s1_llm_screen.jsonl", "stage1_included.csv", "screen")
 
     # 6) CILE expansion for stage-2
-    log.info("[CILE] Running CILE (external module) for stage-2 candidates…")
+    root_log.info("[CILE] Running CILE (external module) for stage-2 candidates…")
 
-    # ---- Build seed PMIDs for CILE (FIXES 'seeds' UNBOUND) ----
+    # ---- Build seed PMIDs for CILE (robust + deterministic) ----
     import csv as _csv
 
-    seeds = []  # list[int]
+    seeds: List[int] = []
     try:
         # Preferred: take top items from stage-1 triage RRF ranking
-        _cand_csv = os.path.join(out_dir, "triage_stage1_candidates.csv")
+        _cand_csv = os.path.join(OUTDIR, "triage_stage1_candidates.csv")
         if os.path.exists(_cand_csv):
             with open(_cand_csv, newline='', encoding='utf-8') as _f:
                 _rows = list(_csv.DictReader(_f))
-            # sort by ascending rank_rrf (1 is best); keep top 12
-            _rows = [r for r in _rows if str(r.get("rank_rrf", "")).strip().isdigit()]
-            _rows.sort(key=lambda r: int(r["rank_rrf"]))
-            seeds = [int(r["pmid"]) for r in _rows[:12]]
+            # sort by ascending rank_rrf (1 is best); allow floaty strings like "1.0"
+            def _rank_int_safe(v) -> int:
+                s = str(v).strip()
+                if s.replace(".", "", 1).isdigit():
+                    try:
+                        return int(float(s))
+                    except Exception:
+                        return 10**9
+                return 10**9
+            _rows = [r for r in _rows if r.get("pmid") and str(r["pmid"]).isdigit()]
+            _rows.sort(key=lambda r: (_rank_int_safe(r.get("rank_rrf")), -int(r.get("year") or 0)))
+            seeds = [int(r["pmid"]) for r in _rows[:1200]]
 
-        # Fallback: try protocol's key PMIDs if present
-        if not seeds:
-            # if your protocol object is named 'proto' (it is, because you use proto.narrative_question above)
-            if hasattr(proto, "key_pmids") and proto.key_pmids:
-                seeds = [int(p) for p in proto.key_pmids[:12]]
+        # Fallback: protocol key_pmids
+        if not seeds and getattr(proto, "key_pmids", None):
+            seeds = [int(p) for p in proto.key_pmids[:1200] if str(p).isdigit()]
 
-        # Last resort: accept small set of kept PMIDs from prefilter_detail.csv
+        # Last resort: first kept PMIDs from prefilter detail
         if not seeds:
-            _pre_csv = os.path.join(out_dir, "prefilter_detail.csv")
+            _pre_csv = os.path.join(OUTDIR, "prefilter_detail.csv")
             if os.path.exists(_pre_csv):
-                with open(_pre_csv, newline='', encoding='utf-8') as _f:
+                with open(_pre_csv, newline='', encoding="utf-8") as _f:
                     _rows = list(_csv.DictReader(_f))
-                _kept = [int(r["pmid"]) for r in _rows if r.get("kept","").lower()=="true"]
-                seeds = _kept[:12]
+                _kept = [int(r["pmid"]) for r in _rows if str(r.get("pmid","")).isdigit() and str(r.get("kept","")).lower()=="true"]
+                seeds = _kept[:1200]
 
         if not seeds:
-            log.warning("[CILE] No seeds found from triage/protocol; CILE will use an empty list (allowed but not ideal).")
-
-    except Exception as e:
-        log.exception("Failed to build CILE seeds; continuing with an empty list.")
+            root_log.warning("[CILE] No seeds found from triage/protocol; proceeding with an empty seed list (allowed but not ideal).")
+    except Exception:
+        root_log.exception("[CILE] Failed to build seeds; continuing with an empty list.")
         seeds = []
 
-    # ---- Run CILE (external module, no exec) ----
+    # ---- Run CILE (external module) ----
     Hf, Af, meta = cile.outer_loop_cile(seeds, cile.OuterConfig(
         accept_policy="elastic_phi",
-        max_accept_after_filter=300,
-        H_external_budget=3000,
-        per_node_ext_frac_cap=0.85,
+        # make the H neighborhood MUCH bigger (match “original PPR” feel)
+        per_node_cap=500,
+        # broaden/disable topic-agnostic gates to avoid tiny A:
+        min_relevance_frac=0.00,
+        per_node_ext_frac_cap=None,
+        H_external_budget=None,           # or a larger number if you want a cap
+        max_accept_after_filter=1200,     # since you seed with up to 1200 now
         deterministic_reservoir=True,
-        min_relevance_frac=0.05,      # set 0.0 to disable relevance gate
         quarantine_hubs=True,
-        quarantine_mode="external",   # "total" or "external"
-        A_expand_pernode_ext_cap=None,
-        A_expand_pernode_ext_frac_cap=None,
+        quarantine_mode="external",
     ))
 
-    # (Optional) Persist a small summary so 'Af' and 'meta' aren’t “unused”
-    try:
-        with open(os.path.join(out_dir, "cile_meta.json"), "w", encoding="utf-8") as _fw:
-            json.dump(meta, _fw, ensure_ascii=False, indent=2)
-        # Dump A PMIDs for downstream
-        _A_pmids = [Hf.pmids[i] for i in sorted(list(Af))]
-        with open(os.path.join(out_dir, "cile_A_pmids.txt"), "w", encoding="utf-8") as _fw:
-            _fw.write("\n".join(str(p) for p in _A_pmids))
-        log.info("[CILE] Wrote cile_meta.json and cile_A_pmids.txt")
-    except Exception:
-        log.warning("[CILE] Could not write cile_meta.json / cile_A_pmids.txt (non-fatal)")
 
+
+    # Persist small artifacts
+    try:
+        with open(os.path.join(OUTDIR, "cile_meta.json"), "w", encoding="utf-8") as _fw:
+            json.dump(meta, _fw, ensure_ascii=False, indent=2)
+        _A_pmids = [Hf.pmids[i] for i in sorted(list(Af))]
+        with open(os.path.join(OUTDIR, "cile_A_pmids.txt"), "w", encoding="utf-8") as _fw:
+            _fw.write("\n".join(str(p) for p in _A_pmids))
+        root_log.info("[CILE] Wrote cile_meta.json and cile_A_pmids.txt")
+    except Exception:
+        root_log.warning("[CILE] Could not write cile_meta.json / cile_A_pmids.txt (non-fatal)")
+
+    # --- Define stage2_pmids deterministically (A-set minus stage-1 universe/kept) ---
+    stage1_kept_pmids = {int(r["pmid"]) for r in (kept or []) if r.get("pmid") is not None}
+    stage2_all_pmids = [Hf.pmids[i] for i in sorted(list(Af))]
+    stage2_pmids = [p for p in stage2_all_pmids if p not in stage1_kept_pmids]
 
 
     # 7) Stage-2 fetch + prefilter
@@ -1229,11 +1259,57 @@ def run_pipeline(protocol_path: str):
                 r["_prefilter_flags"] = flags
                 stage2_recs.append(r)
         _dump_jsonl(os.path.join(OUTDIR, "stage2_prefiltered.jsonl"), stage2_recs)
+        
+    # Write a detail CSV for every raw stage-2 candidate with pass/fail reasons
+    detail_rows = []
+    for r in raw2:
+        # use the same flags the code already attaches for kept ones
+        ok, flags = prefilter_record(r, proto.year_min, proto.year_max,
+                                    set(pt.lower() for pt in proto.pubtype_blocklist),
+                                    set(pt.lower() for pt in proto.designs_allowlist))
+        detail_rows.append({
+            "pmid": r.get("pmid"),
+            "year": r.get("year"),
+            "pubtypes": ";".join(r.get("pubtypes", [])),
+            "ok": bool(ok),
+            "year_ok": bool(flags.get("year_ok")),
+            "pubtype_ok": bool(flags.get("pubtype_ok")),
+            "design_ok": bool(flags.get("design_ok")),
+        })
+
+    # write CSV (header inferred)
+    if detail_rows:
+        write_csv(os.path.join(OUTDIR, "stage2_prefilter_detail.csv"),
+                list(detail_rows[0].keys()), detail_rows)
+
+    # tiny JSON summary
+    from collections import Counter
+    summary = {
+        "n_raw": len(raw2),
+        "n_pass": sum(1 for d in detail_rows if d["ok"]),
+        "fail_breakdown": dict(Counter(
+            reason
+            for d in detail_rows if not d["ok"]
+            for reason in (["year"] if not d["year_ok"] else [])
+                    + (["pubtype"] if not d["pubtype_ok"] else [])
+                    + (["design"] if not d["design_ok"] else [])
+        ))
+    }
+    with open(os.path.join(OUTDIR, "stage2_prefilter_summary.json"), "w", encoding="utf-8") as _fw:
+        json.dump(summary, _fw, ensure_ascii=False, indent=2)
+
 
     # 8) Stage-2 MeSH curation augmentation (iterative) & ranking + screening
     if stage2_recs:
         root_log.info("[MeSH] Stage-2 iterative curation from stage-1 includes…")
-        curated2 = curate_mesh(proto, [int(x) for x in s1inc["pmid"].tolist()], kept + stage2_recs, stage=2)
+        import pandas as _pd
+        s1inc_csv = os.path.join(OUTDIR, "stage1_included.csv")
+        if os.path.exists(s1inc_csv):
+            _s1 = _pd.read_csv(s1inc_csv)
+            _s1_pmids = [int(x) for x in _s1["pmid"].tolist() if str(x).isdigit()]
+        else:
+            _s1_pmids = seeds  # fallback to earlier seed set
+        curated2 = curate_mesh(proto, _s1_pmids, kept + stage2_recs, stage=2)
         root_log.info("[Rank] Stage-2 ranking…")
         rank_stage(proto, stage2_recs, curated2, out_csv="triage_stage2_candidates.csv")
         root_log.info("[Screen] Stage-2 TIAB LLM…")
@@ -1241,6 +1317,7 @@ def run_pipeline(protocol_path: str):
     else:
         curated2 = None
         write_csv(os.path.join(OUTDIR, "triage_stage2_candidates.csv"), [], [])
+
 
     # 9) Merge + handoff
     root_log.info("[Merge] Building master + full-text handoff…")

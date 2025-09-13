@@ -5,12 +5,26 @@
 
   "designs_allowlist": [
     "Randomized Controlled Trial",
+    "Controlled Clinical Trial",
     "Clinical Trial",
     "Pragmatic Clinical Trial",
-    "Meta-Analysis",
-    "Systematic Review"
+    "Comparative Study",
+    "Observational Study",
+    "Cohort Studies",
+    "Case-Control Studies",
+    "Cross-Sectional Studies",
+    "Prospective Studies",
+    "Retrospective Studies",
+    "Multicenter Study",
+    "Evaluation Study"
   ],
   "pubtype_blocklist": [
+    "Review",
+    "Systematic Review",
+    "Meta-Analysis",
+    "Guideline",
+    "Practice Guideline",
+    "Consensus Development Conference",
     "Editorial",
     "Letter",
     "Comment",
@@ -90,6 +104,6 @@
     "embed_endpoint": "http://localhost:1234/v1/embeddings",
     "embed_model": "text-embedding-qwen3-embedding-0.6b@f16",
     "chat_endpoint": "http://localhost:1234/v1/chat/completions",
-    "chat_model": "gemma-3n-e4b-it@q5_k_m"
+    "chat_model": "gemma-3n-e2b-it@q6_k"
   }
 }
