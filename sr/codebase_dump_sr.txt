@@ -1,0 +1,1695 @@
+Project structure for '/c/Users/Galaxy/LEVI/projects/Python/qucik_sr/sr':
+===============================================================================
+  __init__.py
+  __pycache__/__init__.cpython-312.pyc
+  cli/__init__.py
+  cli/__pycache__/__init__.cpython-312.pyc
+  cli/__pycache__/commit.cpython-312.pyc
+  cli/__pycache__/sniff.cpython-312.pyc
+  cli/commit.py
+  cli/run.py
+  cli/sniff.py
+  config/__init__.py
+  config/__pycache__/__init__.cpython-312.pyc
+  config/__pycache__/defaults.cpython-312.pyc
+  config/__pycache__/schema.cpython-312.pyc
+  config/defaults.py
+  config/schema.py
+  core/__init__.py
+  core/__pycache__/__init__.cpython-312.pyc
+  core/__pycache__/commit_orchestrator.cpython-312.pyc
+  core/__pycache__/scheduler.cpython-312.pyc
+  core/__pycache__/sniff_orchestrator.cpython-312.pyc
+  core/commit_orchestrator.py
+  core/engine.py
+  core/scheduler.py
+  core/sniff_orchestrator.py
+  expansion/__init__.py
+  io/__init__.py
+  io/__pycache__/__init__.cpython-312.pyc
+  io/__pycache__/export.cpython-312.pyc
+  io/__pycache__/runs.cpython-312.pyc
+  io/export.py
+  io/runs.py
+  llm/__init__.py
+  llm/__pycache__/__init__.cpython-312.pyc
+  llm/__pycache__/client.cpython-312.pyc
+  llm/__pycache__/prompts.cpython-312.pyc
+  llm/client.py
+  llm/prompts.py
+  ranking/__init__.py
+  ranking/__pycache__/__init__.cpython-312.pyc
+  ranking/__pycache__/ees.cpython-312.pyc
+  ranking/__pycache__/rrf.cpython-312.pyc
+  ranking/__pycache__/signals.cpython-312.pyc
+  ranking/ees.py
+  ranking/rrf.py
+  ranking/signals.py
+  retrieval/__init__.py
+  retrieval/__pycache__/__init__.cpython-312.pyc
+  retrieval/__pycache__/dedupe.cpython-312.pyc
+  retrieval/__pycache__/diary.cpython-312.pyc
+  retrieval/__pycache__/pubmed.cpython-312.pyc
+  retrieval/dedupe.py
+  retrieval/diary.py
+  retrieval/pubmed.py
+  screen/__init__.py
+  screen/__pycache__/__init__.cpython-312.pyc
+  screen/__pycache__/aggregate.cpython-312.pyc
+  screen/__pycache__/gates.cpython-312.pyc
+  screen/__pycache__/passes.cpython-312.pyc
+  screen/__pycache__/verify.cpython-312.pyc
+  screen/aggregate.py
+  screen/gates.py
+  screen/passes.py
+  screen/verify.py
+  telemetry/__init__.py
+  tests/__init__.py
+  tests/fixtures/__init__.py
+
+
+
+###############################################################################
+### FILE: cli/commit.py
+###############################################################################
+# sr/cli/commit.py
+import argparse
+from sr.core.commit_orchestrator import commit
+from sr.core.sniff_orchestrator import infer_protocol
+from sr.io.runs import Runs
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("prompt", type=str)
+    ap.add_argument("--out", type=str, default="")
+    args = ap.parse_args()
+
+    runs = Runs(args.out)
+    draft = infer_protocol(args.prompt)
+    if getattr(draft, "needs_reprompt", False):
+        raise SystemExit(f"Protocol needs reprompt: {draft.reprompt_reason}")
+    ledger, diary = commit(draft, args.prompt, out_dir=str(runs.root))
+    runs.save_json("protocol.json", draft.model_dump())
+    runs.save_json("search_diary.json", diary.snapshot().model_dump())
+    print(f"COMMIT done. Screened: {len(ledger)} | out={runs.root}")
+
+if __name__ == "__main__":
+    main()
+
+
+
+###############################################################################
+### FILE: cli/run.py
+###############################################################################
+# sr/cli/run.py
+import argparse
+from sr.core.engine import run_end_to_end
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("prompt", type=str)
+    ap.add_argument("--out", type=str, default="")
+    args = ap.parse_args()
+    ledger = run_end_to_end(args.prompt, args.out)
+    print(f"End-to-end done. Screened: {len(ledger)}")
+
+if __name__ == "__main__":
+    main()
+
+
+
+###############################################################################
+### FILE: cli/sniff.py
+###############################################################################
+# sr/cli/sniff.py
+import argparse
+import logging
+from sr.core.sniff_orchestrator import infer_protocol, sniff
+from sr.io.runs import Runs
+
+def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s: %(message)s",
+        datefmt="%H:%M:%S"
+    )
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("prompt", type=str)
+    ap.add_argument("--out", type=str, default="")
+    args = ap.parse_args()
+
+    runs = Runs(args.out)
+    logging.getLogger("sniff").info(f"[cli] run dir: {runs.root}")
+
+    draft = infer_protocol(args.prompt)
+    if getattr(draft, "needs_reprompt", False):
+        print("Protocol requires reprompt:", draft.reprompt_reason)
+        return
+
+    proto = draft
+    proto, seeds = sniff(proto, runs)
+    runs.save_json("sniff_protocol.json", proto.model_dump())
+    runs.save_json("sniff_seeds.json", [s.model_dump() for s in seeds])
+
+    # Point to debug artifacts, if present
+    print(f"SNIFF done. Seeds: {len(seeds)} | out={runs.root}")
+    print(f"  Look for: retrieval_debug.json, sniff_candidates.tsv, pass_a_debug.tsv (if generated)")
+
+if __name__ == "__main__":
+    main()
+
+
+
+###############################################################################
+### FILE: config/defaults.py
+###############################################################################
+# sr/config/defaults.py
+from __future__ import annotations
+import os
+
+# LM Studio
+LMSTUDIO_BASE  = os.getenv("LMSTUDIO_BASE", "http://127.0.0.1:1234")
+LMSTUDIO_CHAT  = os.getenv("LMSTUDIO_CHAT_MODEL", "gemma-3n-e4b-it")
+LMSTUDIO_EMB   = os.getenv("LMSTUDIO_EMB_MODEL", "text-embedding-qwen3-embedding-0.6b")
+HTTP_TIMEOUT   = int(os.getenv("HTTP_TIMEOUT", "30"))
+USER_AGENT     = os.getenv("USER_AGENT", "sr-engine/0.1 (+local)")
+
+# PubMed / E-utilities
+ENTREZ_EMAIL   = os.getenv("ENTREZ_EMAIL", "you@example.com")
+ENTREZ_API_KEY = os.getenv("ENTREZ_API_KEY", "")
+
+# Retrieval
+DEFAULT_YEAR_MIN         = int(os.getenv("DEFAULT_YEAR_MIN", "2015"))
+RETRIEVAL_PAGE_SIZE      = int(os.getenv("RETRIEVAL_PAGE_SIZE", "10000"))  # eutils retmax per page
+RETRIEVAL_MAX_PAGES      = int(os.getenv("RETRIEVAL_MAX_PAGES", "10"))     # hard cap for safety
+
+# Screening parameters
+FRONTIER_SIZE            = int(os.getenv("FRONTIER_SIZE", "100"))
+PASS_A_BATCH             = int(os.getenv("PASS_A_BATCH", "50"))
+INCLUDE_CONFIDENCE_TAU   = float(os.getenv("INCLUDE_CONFIDENCE_TAU", "0.62"))
+
+# RRF
+RRF_K                    = int(os.getenv("RRF_K", "60"))
+
+# Filesystem
+DATA_DIR                 = os.getenv("DATA_DIR", "data")
+RUNS_DIR                 = os.getenv("RUNS_DIR", "runs")
+
+# Languages
+DEFAULT_LANGUAGES        = os.getenv("DEFAULT_LANGUAGES", "English,Portuguese,Spanish").split(",")
+
+
+
+###############################################################################
+### FILE: config/schema.py
+###############################################################################
+# sr/config/schema.py
+from __future__ import annotations
+from typing import List, Optional, Literal, Dict, Any
+from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+Reason = Literal[
+    "admin","design_ineligible","population_mismatch","intervention_mismatch",
+    "language","year","insufficient_info","off_topic","animal_preclinical","duplicate_near"
+]
+
+class PICOS(BaseModel):
+    population: str
+    intervention: str
+    comparison: Optional[str] = None
+    outcomes: List[str] = []
+    study_design: List[str] = []  # PubType whitelist semantics in practice
+    year_min: Optional[int] = None
+    languages: List[str] = ["English"]
+    synonyms_population: List[str] = []
+    synonyms_intervention: List[str] = []
+
+class Protocol(BaseModel):
+    review_type: Literal["effects_triage"] = "effects_triage"
+    picos: PICOS
+    allowed_designs: List[str] = []  # PubType names considered eligible
+    retrieval_plan: Dict[str, str] = Field(default_factory=dict)  # name -> query string
+    accept_confidence_tau: float = 0.62
+    drop_adjuncts: bool = True
+
+class Record(BaseModel):
+    pmid: str
+    title: Optional[str] = ""
+    abstract: Optional[str] = ""
+    year: Optional[int] = None
+    language: Optional[str] = None
+    publication_types: List[str] = []
+    doi: Optional[str] = None
+    source: Literal["retrieval","expansion"] = "retrieval"
+
+class Signals(BaseModel):
+    pi_hits_title: int = 0
+    pi_hits_abstract: int = 0
+    tfidf_cos: float = 0.0
+    embed_cos: float = 0.0
+    design_prior: float = 0.0
+    recency_scaled: float = 0.0
+    abstract_missing: bool = False
+
+class RRFScore(BaseModel):
+    score: float
+    components: Dict[str, int]  # ranks
+
+class PassAResult(BaseModel):
+    pmid: str
+    decision: Literal["include","borderline","exclude"]
+    confidence: float
+    reason: Reason
+    population_quote: str = ""
+    intervention_quote: str = ""
+    design_evidence: str = ""
+    justification_short: str = ""
+
+class PassBResult(BaseModel):
+    pmid: str
+    stance: Literal["confirm","challenge"]
+    flags: Dict[str, bool] = Field(default_factory=dict)
+    confidence: float = 0.0
+    justification_short: str = ""
+
+class PassCResult(BaseModel):
+    pmid: str
+    decision: Literal["include","borderline","exclude"]
+    confidence: float
+    reasons: List[Reason] = []
+    resolution_note: str = ""
+
+class FinalDecision(BaseModel):
+    pmid: str
+    final: Literal["include_for_full_text","borderline","exclude"]
+    reason: Reason
+    justification: str
+    quotes_ok: bool
+    design_ok: bool
+    passes_triggered: List[str]
+    rrf: Optional[RRFScore] = None
+    ees: Optional[float] = None
+
+class SearchDiary(BaseModel):
+    db: str = "pubmed"
+    queries: List[Dict[str, Any]] = []
+    pages: int = 0
+    total_ids: int = 0
+
+class LedgerRow(BaseModel):
+    record: Record
+    signals: Signals
+    rrf: RRFScore
+    ees: Optional[float] = None
+    pass_a: Optional[PassAResult] = None
+    pass_b: Optional[PassBResult] = None
+    pass_c: Optional[PassCResult] = None
+    final: Optional[FinalDecision] = None
+
+
+
+###############################################################################
+### FILE: core/commit_orchestrator.py
+###############################################################################
+# sr/core/commit_orchestrator.py
+from __future__ import annotations
+from typing import List, Dict, Tuple
+from sr.config.schema import Protocol, Record, Signals, LedgerRow, FinalDecision
+from sr.retrieval.pubmed import esearch_paged, efetch_abstracts, to_records
+from sr.retrieval.dedupe import dedupe
+from sr.retrieval.diary import Diary
+from sr.screen.gates import apply_gates
+from sr.ranking.signals import build_tfidf_corpus, compute_signals
+from sr.core.scheduler import build_ranks, fuse_to_rrf, pick_frontier, ees_within_frontier
+from sr.ranking.ees import EESModel
+from sr.screen.passes import pass_a, pass_b, pass_c
+from sr.screen.aggregate import aggregate, dissonant
+from sr.io.export import write_ledger_and_prisma
+from sr.config.defaults import FRONTIER_SIZE, PASS_A_BATCH
+
+def commit(proto: Protocol, question_text: str, out_dir: str) -> Tuple[List[LedgerRow], Diary]:
+    diary = Diary()
+    # Retrieval
+    ids_all: List[str] = []
+    for name, q in (proto.retrieval_plan or {}).items():
+        diary.log_query(name, q)
+        ids = esearch_paged(q, mindate=proto.picos.year_min)
+        ids_all.extend(ids)
+    ids_all = list(dict.fromkeys(ids_all))
+    diary.set_total(len(ids_all))
+
+    raw = efetch_abstracts(ids_all)
+    recs = dedupe(to_records(raw))
+
+    # Gates
+    pool: List[Record] = []
+    ledger: List[LedgerRow] = []
+    for r in recs:
+        gate = apply_gates(r, proto)
+        if gate:
+            # deterministic exclude; log minimal row if desired
+            continue
+        pool.append(r)
+
+    if not pool:
+        return ledger, diary
+
+    # Signals + RRF
+    vec, X = build_tfidf_corpus(pool)
+    sigs: Dict[str, Signals] = compute_signals(pool, proto, vec, X, question_text)
+    ranks = build_ranks(pool, sigs)
+    rrf = fuse_to_rrf(ranks)
+    frontier_ids = pick_frontier(rrf, FRONTIER_SIZE)
+
+    # EES within frontier (epochal learning: cold start -> identity)
+    ees = EESModel()
+    batch_ids = ees_within_frontier(ees, sigs, frontier_ids, PASS_A_BATCH)
+
+    # Passes + aggregation
+    for pid in batch_ids:
+        rec = next(r for r in pool if r.pmid == pid)
+        a = pass_a(proto, rec)
+        # dissonance triggers
+        rrfs = rrf[pid].score
+        b=None; c=None
+        if dissonant(a, rrfs, None):
+            b = pass_b(proto, rec, a, "include@low_RRF")
+            if b.stance == "challenge":
+                c = pass_c(proto, rec, a, b)
+        final = aggregate(proto, rec, rrf[pid], a, b, c)
+        ledger.append(LedgerRow(
+            record=rec,
+            signals=sigs[pid],
+            rrf=rrf[pid],
+            ees=None,
+            pass_a=a,
+            pass_b=b,
+            pass_c=c,
+            final=final
+        ))
+
+    # Export
+    write_ledger_and_prisma(ledger, out_dir)
+    return ledger, diary
+
+
+
+###############################################################################
+### FILE: core/engine.py
+###############################################################################
+# sr/core/engine.py
+from __future__ import annotations
+from typing import Tuple, List
+from sr.core.sniff_orchestrator import infer_protocol, sniff
+from sr.core.commit_orchestrator import commit
+from sr.io.runs import Runs
+from sr.config.schema import Protocol, Record
+
+def run_end_to_end(nl_prompt: str, out_dir: str):
+    runs = Runs(out_dir)
+    draft = infer_protocol(nl_prompt)
+    if getattr(draft, "needs_reprompt", False):
+        raise RuntimeError(f"Protocol requires user clarification: {draft.reprompt_reason}")
+
+    proto: Protocol = Protocol(**draft.model_dump())
+    proto, seeds = sniff(proto, runs)
+    runs.save_json("sniff_seeds.json", [s.model_dump() for s in seeds])
+
+    # Freeze protocol here (already concrete). Commit triage:
+    ledger, diary = commit(proto, nl_prompt, out_dir=runs.root)
+    runs.save_json("search_diary.json", diary.snapshot().model_dump())
+    return ledger
+
+
+
+###############################################################################
+### FILE: core/scheduler.py
+###############################################################################
+# sr/core/scheduler.py
+from __future__ import annotations
+from typing import List, Dict, Tuple
+import numpy as np
+from sr.config.schema import Record, Protocol, Signals, RRFScore
+from sr.ranking.rrf import rrf_fuse
+from sr.ranking.ees import EESModel
+
+def build_ranks(records: List[Record], signals: Dict[str, Signals]) -> Dict[str, Dict[str,int]]:
+    # Build individual rank lists (lower rank = better); we store 1-based ranks
+    pmids = [r.pmid for r in records]
+
+    def rank_by(key):
+        vals = [(pid, getattr(signals[pid], key)) for pid in pmids]
+        # Descending sort (higher is better)
+        vals.sort(key=lambda t: (-t[1], t[0]))
+        return {pid: (i+1) for i,(pid,_) in enumerate(vals)}
+
+    r_tfidf = rank_by("tfidf_cos")
+    r_embed = rank_by("embed_cos")
+    r_pi    = rank_by("pi_hits_title")
+    r_design= rank_by("design_prior")
+    r_recent= rank_by("recency_scaled")
+
+    out: Dict[str, Dict[str,int]] = {}
+    for pid in pmids:
+        out[pid] = {
+            "tfidf": r_tfidf.get(pid, 10**9),
+            "embed": r_embed.get(pid, 10**9),
+            "pi":    r_pi.get(pid, 10**9),
+            "design":r_design.get(pid, 10**9),
+            "recency":r_recent.get(pid, 10**9),
+        }
+    return out
+
+def fuse_to_rrf(ranks: Dict[str, Dict[str,int]]) -> Dict[str, RRFScore]:
+    fused = rrf_fuse(ranks)
+    # Build back component ranks for audit
+    out: Dict[str, RRFScore] = {}
+    for pmid, score in fused.items():
+        out[pmid] = RRFScore(score=float(score), components=ranks[pmid])
+    return out
+
+def pick_frontier(rrf_scores: Dict[str, RRFScore], size: int) -> List[str]:
+    items = sorted(rrf_scores.items(), key=lambda kv: (-kv[1].score, kv[0]))
+    return [pid for pid,_ in items[:size]]
+
+def ees_within_frontier(ees: EESModel, signals: Dict[str, Signals], frontier: List[str], take: int) -> List[str]:
+    preds = ees.predict({pid: signals[pid] for pid in frontier})
+    # sort by EES descending
+    ordered = sorted(frontier, key=lambda pid: (-preds.get(pid, 0.5), pid))
+    return ordered[:take]
+
+
+
+###############################################################################
+### FILE: core/sniff_orchestrator.py
+###############################################################################
+# sr/core/sniff_orchestrator.py
+from __future__ import annotations
+from typing import Tuple, List
+from sr.config.schema import Protocol, PICOS, Record
+from sr.llm.client import chat_json
+from sr.llm.prompts import PROTOCOL_SYSTEM, protocol_user, _protocol_template_json
+from sr.retrieval.pubmed import esearch_paged, efetch_abstracts, to_records
+from sr.retrieval.dedupe import dedupe
+from sr.io.runs import Runs
+from sr.config.defaults import DEFAULT_YEAR_MIN, DEFAULT_LANGUAGES
+from sr.screen.passes import pass_a
+import logging
+from collections import Counter
+
+log = logging.getLogger("sniff")
+
+
+class ProtocolDraft(Protocol):  # pydantic inheritance OK
+    needs_reprompt: bool = False
+    reprompt_reason: str = ""
+
+def infer_protocol(nl: str) -> ProtocolDraft:
+    # Supply the template to the repair step so tiny models can be nudged into shape
+    res = chat_json(
+        PROTOCOL_SYSTEM,
+        protocol_user(nl),
+        schema_model=ProtocolDraft,
+        temperature=0.0,
+        max_tokens=900,
+        template_for_repair=_protocol_template_json(),
+    )
+    assert isinstance(res, ProtocolDraft)
+
+    # Minimal defaults
+    if not res.picos.year_min:
+        res.picos.year_min = DEFAULT_YEAR_MIN
+    if not res.picos.languages:
+        res.picos.languages = DEFAULT_LANGUAGES
+
+    # Enforce: retrieval_plan must not be empty (no silent auto-fill)
+    if not res.retrieval_plan or len(res.retrieval_plan) == 0:
+        res.needs_reprompt = True
+        res.reprompt_reason = "retrieval_plan is empty; provide at least 'broad' and 'focused' PubMed queries built from Population and Intervention title/abstract terms."
+
+    # Also check if the two required keys exist but are empty strings
+    if not res.needs_reprompt:
+        rp = res.retrieval_plan or {}
+        missing = []
+        for key in ("broad", "focused"):
+            if key not in rp or not isinstance(rp[key], str) or not rp[key].strip():
+                missing.append(key)
+        if missing:
+            res.needs_reprompt = True
+            res.reprompt_reason = f"retrieval_plan missing or empty for: {', '.join(missing)}."
+
+    return res
+
+
+def sniff(proto: Protocol, runs: Runs, pilot_cap: int = 1200, top_k: int = 60, min_primaries: int = 3) -> Tuple[Protocol, List[Record]]:
+    # --- Retrieval across all queries (no fallback) ---
+    qmap = proto.retrieval_plan or {}
+    if not qmap:
+        log.error("[sniff] retrieval_plan is empty -> 0 seeds is expected. Aborting sniff early.")
+        runs.save_json("retrieval_debug.json", {
+            "error": "empty_retrieval_plan",
+            "protocol_snapshot": proto.model_dump()
+        })
+        return proto, []
+
+    ids_all: List[str] = []
+    per_query_hits = []
+    for name, q in qmap.items():
+        try:
+            ids = esearch_paged(q, mindate=proto.picos.year_min)
+        except Exception as e:
+            log.exception(f"[sniff] esearch failed for query '{name}': {e}")
+            ids = []
+        per_query_hits.append({"name": name, "hits": len(ids)})
+        ids_all.extend(ids)
+
+    # Dedupe IDs and cap
+    ids_all = list(dict.fromkeys(ids_all))
+    log.info(f"[sniff] queries={len(qmap)} | total_ids={len(ids_all)} | per_query_hits={per_query_hits}")
+
+    runs.save_json("retrieval_debug.json", {
+        "queries": qmap,
+        "per_query_hits": per_query_hits,
+        "total_ids": len(ids_all),
+        "pilot_cap": pilot_cap
+    })
+
+    if not ids_all:
+        log.warning("[sniff] 0 IDs after retrieval. Check retrieval_debug.json and your protocol prompt.")
+        return proto, []
+
+    ids_all = ids_all[:pilot_cap]
+
+    # --- Fetch + dedupe ---
+    raw = efetch_abstracts(ids_all)
+    recs = dedupe(to_records(raw))
+    log.info(f"[sniff] efetch raw={len(raw)} | unique_records={len(recs)}")
+
+    if not recs:
+        log.warning("[sniff] 0 records after efetch/dedupe.")
+        return proto, []
+
+    # --- Candidate ordering: simple P&I presence over title+abstract (for visibility only) ---
+    def _hits(text: str, terms: list[str]) -> int:
+        tl = (text or "").lower()
+        return sum(1 for s in terms if s and s.strip() and s.lower() in tl)
+
+    pop_terms = [proto.picos.population] + (proto.picos.synonyms_population or [])
+    int_terms = [proto.picos.intervention] + (proto.picos.synonyms_intervention or [])
+
+    def score_ta(r: Record) -> int:
+        t = (r.title or "") + "\n" + (r.abstract or "")
+        return _hits(t, pop_terms) + _hits(t, int_terms)
+
+    recs_sorted = sorted(recs, key=lambda r: (-score_ta(r), r.pmid))
+    candidates = recs_sorted[:top_k]
+    log.info(f"[sniff] candidates_for_passA={len(candidates)} (top_k={top_k})")
+
+    # Dump candidates TSV for quick eyeballing
+    try:
+        p = runs.path("sniff_candidates.tsv")
+        with open(p, "w", encoding="utf-8", newline="") as f:
+            f.write("pmid\tyear\tpubtypes\tscore_ta\ttitle\n")
+            for r in candidates:
+                st = score_ta(r)
+                t = (r.title or "").replace("\t", " ").replace("\n", " ")
+                f.write(f"{r.pmid}\t{r.year or ''}\t{';'.join(r.publication_types)}\t{st}\t{t[:160]}\n")
+        log.info(f"[sniff] wrote {p}")
+    except Exception as e:
+        log.warning(f"[sniff] failed to write sniff_candidates.tsv: {e}")
+
+    # --- Pass A over candidates (no behavior changes) ---
+    includes: List[Record] = []
+    pass_a_rows = []
+    reason_counter = Counter()
+    decision_counter = Counter()
+
+    for r in candidates:
+        try:
+            a = pass_a(proto, r)
+        except Exception as e:
+            log.exception(f"[sniff] Pass-A crashed for pmid={r.pmid}: {e}")
+            continue
+
+        decision_counter[a.decision] += 1
+        reason_counter[a.reason] += 1
+
+        pass_a_rows.append({
+            "pmid": r.pmid,
+            "decision": a.decision,
+            "confidence": a.confidence,
+            "reason": a.reason,
+            "title": (r.title or "")[:160]
+        })
+
+        if a.decision == "include":
+            includes.append(r)
+            if len(includes) >= min_primaries:
+                break
+
+    log.info(f"[sniff] Pass-A decisions: {dict(decision_counter)} | reasons_top={reason_counter.most_common(6)}")
+    log.info(f"[sniff] seeds_selected={len(includes)} (min_primaries={min_primaries})")
+
+    # Dump pass-a debug TSV
+    try:
+        p = runs.path("pass_a_debug.tsv")
+        with open(p, "w", encoding="utf-8", newline="") as f:
+            f.write("pmid\tdecision\tconfidence\treason\ttitle\n")
+            for row in pass_a_rows:
+                f.write(f"{row['pmid']}\t{row['decision']}\t{row['confidence']:.3f}\t{row['reason']}\t{row['title'].replace('\t',' ')}\n")
+        log.info(f"[sniff] wrote {p}")
+    except Exception as e:
+        log.warning(f"[sniff] failed to write pass_a_debug.tsv: {e}")
+
+    if not includes:
+        log.warning("[sniff] 0 seeds after Pass-A. Inspect pass_a_debug.tsv and sniff_candidates.tsv to see decisions and reasons.")
+
+    return proto, includes
+
+
+
+###############################################################################
+### FILE: io/export.py
+###############################################################################
+# sr/io/export.py
+from __future__ import annotations
+from typing import List, Dict, Any
+import csv, json, pathlib
+from collections import Counter
+from sr.config.schema import LedgerRow
+
+def prisma_counts(ledger: List[LedgerRow]) -> Dict[str, Any]:
+    N = len(ledger)
+    finals = [r.final.final if r.final else "unknown" for r in ledger]
+    reasons = [r.final.reason for r in ledger if r.final]
+    return {
+        "records_screened": N,
+        "included": finals.count("include_for_full_text"),
+        "excluded": finals.count("exclude"),
+        "borderline": finals.count("borderline"),
+        "exclusions_by_reason": dict(Counter(reasons)),
+    }
+
+def write_ledger_and_prisma(ledger: List[LedgerRow], out_dir: str):
+    root = pathlib.Path(out_dir)
+    root.mkdir(parents=True, exist_ok=True)
+
+    # ledger.tsv
+    with open(root/"ledger.tsv", "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f, delimiter="\t")
+        w.writerow(["pmid","final","reason","rrf","tfidf_cos","embed_cos","pi_hits_t","pi_hits_a","design_prior","recency","title"])
+        for row in ledger:
+            r = row.record; s = row.signals; fin = row.final
+            w.writerow([r.pmid, fin.final if fin else "", fin.reason if fin else "", f"{row.rrf.score:.6f}",
+                        f"{s.tfidf_cos:.4f}", f"{s.embed_cos:.4f}", s.pi_hits_title, s.pi_hits_abstract, f"{s.design_prior:.1f}", f"{s.recency_scaled:.3f}",
+                        (r.title or "").replace("\t"," ").replace("\n"," ")[:160]])
+    # prisma
+    with open(root/"prisma_triage.json", "w", encoding="utf-8") as f:
+        json.dump(prisma_counts(ledger), f, ensure_ascii=False, indent=2)
+
+
+
+###############################################################################
+### FILE: io/runs.py
+###############################################################################
+# sr/io/runs.py
+from __future__ import annotations
+import pathlib, json, time
+from sr.config.defaults import RUNS_DIR
+
+class Runs:
+    def __init__(self, out_dir: str = ""):
+        self.root = pathlib.Path(out_dir) if out_dir else pathlib.Path(RUNS_DIR) / f"run_{int(time.time())}"
+        self.root.mkdir(parents=True, exist_ok=True)
+    def path(self, name: str) -> pathlib.Path:
+        p = self.root / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+    def save_json(self, name: str, obj):
+        p = self.path(name)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+
+
+
+###############################################################################
+### FILE: llm/client.py
+###############################################################################
+# sr/llm/client.py — full replacement
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import time
+from typing import Optional, Any, List, Dict
+
+import requests
+from pydantic import BaseModel
+
+from sr.config.defaults import (
+    LMSTUDIO_BASE,
+    LMSTUDIO_CHAT,
+    LMSTUDIO_EMB,
+    HTTP_TIMEOUT,
+    USER_AGENT,
+)
+from sr.llm.prompts import REPAIR_SYSTEM, repair_user
+
+# -----------------------------------------------------------------------------
+# HTTP defaults
+# -----------------------------------------------------------------------------
+
+HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "User-Agent": USER_AGENT,
+}
+
+log = logging.getLogger("llm")
+
+# -----------------------------------------------------------------------------
+# Low-level chat call
+# -----------------------------------------------------------------------------
+
+def chat(
+    messages: List[Dict[str, str]],
+    *,
+    temperature: float = 0.0,
+    max_tokens: int = 900,
+    response_format: Optional[dict] = None,
+    retries: int = 2,
+) -> str:
+    """
+    Thin wrapper for LM Studio /v1/chat/completions.
+    Returns the message.content string.
+    """
+    url = f"{LMSTUDIO_BASE.rstrip('/')}/v1/chat/completions"
+    body = {
+        "model": LMSTUDIO_CHAT,
+        "messages": messages,
+        "temperature": float(temperature),
+        "max_tokens": int(max_tokens),
+        "stream": False,
+    }
+    if response_format is not None:
+        body["response_format"] = response_format
+
+    backoff = 0.8
+    last_err = None
+    for _ in range(retries + 1):
+        try:
+            r = requests.post(url, headers=HEADERS, json=body, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            js = r.json()
+            return js["choices"][0]["message"]["content"]
+        except Exception as e:
+            last_err = e
+            time.sleep(backoff)
+            backoff *= 1.7
+    raise RuntimeError(f"chat call failed: {last_err}")
+
+def _post_chat(messages: List[Dict[str, str]], *, temperature: float, max_tokens: int) -> str:
+    """
+    Back-compat helper used by chat_json(); delegates to chat().
+    """
+    return chat(messages, temperature=temperature, max_tokens=max_tokens, response_format=None)
+
+# -----------------------------------------------------------------------------
+# JSON extraction / sanitation
+# -----------------------------------------------------------------------------
+
+_BEGIN = re.compile(r"BEGIN_JSON\s*", re.I)
+_END   = re.compile(r"\s*END_JSON", re.I)
+FENCE_BLOCK = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.I)
+
+def _extract_fenced_json(text: str) -> str:
+    """
+    Preference order:
+      1) last BEGIN_JSON … END_JSON block,
+      2) last ```json ... ``` fenced block (or any ``` ... ```),
+      3) last {...} object,
+      4) last [...] array.
+    Raises if nothing JSON-like found.
+    """
+    # BEGIN/END blocks (support multiple; take last)
+    blocks = []
+    pos = 0
+    while True:
+        m1 = _BEGIN.search(text, pos)
+        if not m1:
+            break
+        m2 = _END.search(text, m1.end())
+        if not m2:
+            break
+        blocks.append(text[m1.end():m2.start()])
+        pos = m2.end()
+    if blocks:
+        return blocks[-1].strip()
+
+    # ```json fenced
+    fences = FENCE_BLOCK.findall(text)
+    if fences:
+        return fences[-1].strip()
+
+    # any ``` ... ```
+    m_any_fence = re.findall(r"```([\s\S]*?)```", text)
+    if m_any_fence:
+        return m_any_fence[-1].strip()
+
+    # last { ... }
+    objs = list(re.finditer(r"\{[\s\S]*\}", text))
+    if objs:
+        return objs[-1].group(0)
+
+    # last [ ... ]
+    arrs = list(re.finditer(r"\[[\s\S]*\]", text))
+    if arrs:
+        return arrs[-1].group(0)
+
+    raise ValueError("No JSON found in model output")
+
+def _sanitize_json(s: str) -> str:
+    # Normalize quotes and remove trailing commas
+    s = s.replace("\u201c", '"').replace("\u201d", '"').replace("\u2018", "'").replace("\u2019", "'")
+    s = re.sub(r",\s*(\}|\])", r"\1", s)
+    # strip stray code fences if any remain
+    s = s.replace("```", "").strip()
+    return s
+
+def _coerce_arrays(obj: Any) -> Any:
+    """
+    Minimal structural repair for known list fields:
+      picos.outcomes, picos.study_design, picos.languages,
+      picos.synonyms_population, picos.synonyms_intervention, allowed_designs
+    string -> [string], None -> []
+    """
+    if not isinstance(obj, dict):
+        return obj
+    p = obj.get("picos")
+    if isinstance(p, dict):
+        for key in ("outcomes", "study_design", "languages", "synonyms_population", "synonyms_intervention"):
+            v = p.get(key, [])
+            if v is None:
+                p[key] = []
+            elif isinstance(v, str):
+                p[key] = [v] if v.strip() else []
+            elif not isinstance(v, list):
+                p[key] = [v]
+    if "allowed_designs" in obj:
+        v = obj.get("allowed_designs")
+        if v is None:
+            obj["allowed_designs"] = []
+        elif isinstance(v, str):
+            obj["allowed_designs"] = [v] if v.strip() else []
+        elif not isinstance(v, list):
+            obj["allowed_designs"] = [v]
+    return obj
+
+# -----------------------------------------------------------------------------
+# Public: chat_json (repair-aware)
+# -----------------------------------------------------------------------------
+
+def chat_json(
+    system: str,
+    user: str,
+    schema_model: Optional[type[BaseModel]] = None,
+    *,
+    temperature: float = 0.0,
+    max_tokens: int = 900,
+    template_for_repair: Optional[str] = None,
+) -> dict | BaseModel:
+    """
+    Robust JSON:
+      1) ask LM (temp=0),
+      2) extract fenced JSON, sanitize, parse,
+      3) coerce known arrays,
+      4) pydantic-validate,
+      5) if validation fails AND template provided → one repair attempt via LM, then repeat 2–4.
+    """
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    raw = _post_chat(messages, temperature=temperature, max_tokens=max_tokens)
+
+    def _parse_then_validate(txt: str):
+        js = _sanitize_json(_extract_fenced_json(txt))
+        obj = json.loads(js)
+        obj = _coerce_arrays(obj)
+        if schema_model is None:
+            return obj
+        return schema_model.model_validate(obj)
+
+    try:
+        return _parse_then_validate(raw)
+    except Exception as first_err:
+        # if no template, surface the first error immediately
+        if not template_for_repair:
+            raise
+        # one repair attempt with template
+        rep_user = repair_user(template_for_repair, raw)
+        repaired = _post_chat(
+            [{"role": "system", "content": REPAIR_SYSTEM}, {"role": "user", "content": rep_user}],
+            temperature=0.0,
+            max_tokens=max_tokens,
+        )
+        try:
+            return _parse_then_validate(repaired)
+        except Exception as second_err:
+            # surface the original failure with context
+            raise RuntimeError(f"JSON/schema failure; first={first_err}; after-repair={second_err}")
+
+# -----------------------------------------------------------------------------
+# Embeddings
+# -----------------------------------------------------------------------------
+
+def embed_texts(texts: List[str], *, model: Optional[str] = None, retries: int = 2) -> List[List[float]]:
+    """
+    LM Studio /v1/embeddings wrapper.
+    Returns a list of embedding vectors (list[float]) in the same order as inputs.
+    """
+    url = f"{LMSTUDIO_BASE.rstrip('/')}/v1/embeddings"
+    body = {"model": model or LMSTUDIO_EMB, "input": texts}
+    backoff = 0.8
+    last_err = None
+    for _ in range(retries + 1):
+        try:
+            r = requests.post(url, headers=HEADERS, json=body, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            data = r.json()["data"]
+            return [d["embedding"] for d in data]
+        except Exception as e:
+            last_err = e
+            time.sleep(backoff)
+            backoff *= 1.7
+    raise RuntimeError(f"embedding call failed: {last_err}")
+
+
+
+###############################################################################
+### FILE: llm/prompts.py
+###############################################################################
+# sr/llm/prompts.py — full replacement
+
+from __future__ import annotations
+import json
+
+# =========================
+# Protocol inference prompts
+# =========================
+
+PROTOCOL_SYSTEM = """
+You will return strict JSON for a PRISMA title/abstract triage protocol.
+
+REQUIREMENTS
+- Produce ONE JSON object only, wrapped between literal markers:
+  BEGIN_JSON
+  { ...json... }
+  END_JSON
+- Do NOT add any extra prose outside the JSON block.
+- Arrays must be arrays even for singletons. No null strings. Use null only where allowed.
+
+FIELDS (schema)
+- review_type: must be "effects_triage"
+- picos: object with:
+  - population: string (concise, concrete)
+  - intervention: string (concise, concrete)
+  - comparison: string or null
+  - outcomes: array of strings (0+)
+  - study_design: array of strings (0+) (free-form but concise, e.g., ["Randomized Controlled Trial"])
+  - year_min: integer year or null
+  - languages: array of strings (0+), e.g., ["English","Portuguese","Spanish"]
+  - synonyms_population: array of strings (0+)
+  - synonyms_intervention: array of strings (0+)
+- allowed_designs: array of PubMed Publication Type names considered eligible (may be empty)
+- retrieval_plan: OBJECT **REQUIRED** mapping names to PubMed Boolean query strings.
+  • MUST include at least:
+    - "broad": a broad Title/Abstract query with (Population) AND (Intervention), expanded by synonyms via OR.
+    - "focused": a stricter Title/Abstract query variant (e.g., include key outcome terms or specific procedure synonyms).
+  • Use Title/Abstract terms (no MeSH requirement).
+  • Do NOT include language or date filters inside the query. Year and languages are handled separately.
+- accept_confidence_tau: float (leave as provided in template)
+- drop_adjuncts: boolean (leave as provided in template)
+
+IF YOU CANNOT CONSTRUCT a meaningful retrieval_plan from the user's intent:
+- Set "needs_reprompt": true
+- Set "reprompt_reason": a short, concrete sentence explaining exactly what is missing (e.g., “Intervention ambiguous: multiple candidate techniques named; need one.”)
+- Still return a valid JSON object with all required keys; retrieval_plan may be {} in that case.
+
+FORMAT
+- Only one JSON object, between BEGIN_JSON and END_JSON.
+- No comments. No trailing commas.
+"""
+
+def _protocol_template_json() -> str:
+    # Template the model should fill; keeps the structure crystal-clear for small models.
+    tmpl = {
+        "review_type": "effects_triage",
+        "picos": {
+            "population": "",
+            "intervention": "",
+            "comparison": None,
+            "outcomes": [],
+            "study_design": [],
+            "year_min": None,
+            "languages": [],
+            "synonyms_population": [],
+            "synonyms_intervention": []
+        },
+        "allowed_designs": [],
+        "retrieval_plan": {
+            "broad": "",
+            "focused": ""
+        },
+        "accept_confidence_tau": 0.62,
+        "drop_adjuncts": True,
+        # optional gates
+        "needs_reprompt": False,
+        "reprompt_reason": ""
+    }
+    # Pretty-print so it’s easy for the LM to copy the exact structure.
+    return json.dumps(tmpl, ensure_ascii=False, indent=2)
+
+def protocol_user(nl: str) -> str:
+    return f"""NATURAL_LANGUAGE_INTENT:
+<<<
+{nl}
+>>>
+
+Instructions:
+- Fill the JSON template below with concrete values.
+- If you truly cannot build a retrieval_plan, set needs_reprompt=true and give reprompt_reason.
+- Return ONLY one JSON object enclosed by BEGIN_JSON/END_JSON.
+
+BEGIN_JSON
+{_protocol_template_json()}
+END_JSON
+"""
+
+# =========================
+# JSON repair prompts
+# =========================
+
+REPAIR_SYSTEM = """
+You repair malformed JSON to match a provided template structure.
+
+Rules:
+- Return exactly ONE JSON object, wrapped between BEGIN_JSON/END_JSON.
+- No commentary. No backticks. No extra keys. No trailing commas.
+- Preserve the schema and key names from the template.
+- Coerce singleton strings to arrays where the template shows arrays.
+- If a required field cannot be sensibly filled, set needs_reprompt=true and provide a clear reprompt_reason.
+"""
+
+def repair_user(template_json: str, bad_output: str) -> str:
+    return f"""TEMPLATE_JSON:
+{template_json}
+
+BAD_OUTPUT:
+{bad_output}
+
+TASK:
+- Produce valid JSON that matches TEMPLATE_JSON’s structure and keys.
+- If retrieval_plan cannot be constructed, set needs_reprompt=true with a concrete reprompt_reason.
+
+Return only:
+
+BEGIN_JSON
+{{...}}
+END_JSON
+"""
+
+# =========================
+# Screening passes prompts
+# =========================
+
+PASS_A_SYSTEM = """You are a PRISMA TITLE/ABSTRACT screener for effects triage.
+Decide INCLUDE, BORDERLINE, or EXCLUDE strictly from the protocol and the record.
+
+Rules:
+- Use publication types as design evidence; do not infer design from title alone.
+- If P or I is missing from Title/Abstract, BORDERLINE unless there is a clear mismatch -> EXCLUDE.
+- Admin/adjunct (review/meta/guideline/case report) are excluded for effects triage (if protocol drop_adjuncts=true).
+- Provide population_quote and intervention_quote as exact verbatim excerpts from title/abstract when possible; empty if absent.
+- Return ONLY JSON as requested by the caller's schema, wrapped in BEGIN_JSON/END_JSON.
+"""
+
+def pass_a_user(protocol_json: str, record_json: str) -> str:
+    return f"""PROTOCOL_JSON:
+{protocol_json}
+
+RECORD_JSON:
+{record_json}
+
+Return ONLY one JSON object in BEGIN_JSON/END_JSON.
+"""
+
+PASS_B_SYSTEM = """You are a critical auditor for a previous Pass A decision.
+Given the protocol and record, either confirm or challenge the Pass A decision.
+
+Return fields:
+- stance: "confirm" or "challenge"
+- flags: object with booleans (e.g., {"p_missing":true,"i_missing":false})
+- confidence: float
+- justification_short: one sentence
+
+Return ONLY JSON in BEGIN_JSON/END_JSON.
+"""
+
+def pass_b_user(protocol_json: str, record_json: str, pass_a_json: str, trigger_note: str) -> str:
+    return f"""PROTOCOL_JSON:
+{protocol_json}
+
+RECORD_JSON:
+{record_json}
+
+PASS_A_JSON:
+{pass_a_json}
+
+TRIGGER_NOTE: {trigger_note}
+
+Return ONLY one JSON object in BEGIN_JSON/END_JSON.
+"""
+
+PASS_C_SYSTEM = """Consensus tie-break.
+Resolve to include|borderline|exclude with reasons list and a short resolution note.
+Return ONLY JSON in BEGIN_JSON/END_JSON.
+"""
+
+def pass_c_user(protocol_json: str, record_json: str, pass_a_json: str, pass_b_json: str) -> str:
+    return f"""PROTOCOL_JSON:
+{protocol_json}
+
+RECORD_JSON:
+{record_json}
+
+PASS_A_JSON:
+{pass_a_json}
+
+PASS_B_JSON:
+{pass_b_json}
+
+Return ONLY one JSON object in BEGIN_JSON/END_JSON.
+"""
+
+
+
+###############################################################################
+### FILE: ranking/ees.py
+###############################################################################
+# sr/ranking/ees.py
+from __future__ import annotations
+from typing import List, Tuple, Dict
+import numpy as np
+from sklearn.linear_model import SGDClassifier
+from sklearn.preprocessing import StandardScaler
+from sr.config.schema import Signals
+
+class EESModel:
+    def __init__(self):
+        self.scaler = StandardScaler(with_mean=True, with_std=True)
+        self.clf = SGDClassifier(loss="log_loss", random_state=17)
+        self.fitted = False
+
+    @staticmethod
+    def features(sig: Signals) -> np.ndarray:
+        return np.array([
+            sig.pi_hits_title, sig.pi_hits_abstract, sig.tfidf_cos, sig.embed_cos,
+            sig.design_prior, sig.recency_scaled, 1.0 if sig.abstract_missing else 0.0
+        ], dtype=np.float32)
+
+    def fit_epoch(self, pos: List[Signals], neg: List[Signals]):
+        if not pos or not neg:
+            return
+        X = np.vstack([self.features(s) for s in (pos + neg)])
+        y = np.array([1]*len(pos) + [0]*len(neg), dtype=np.int32)
+        self.scaler.fit(X)
+        Xs = self.scaler.transform(X)
+        self.clf.partial_fit(Xs, y, classes=np.array([0,1]))
+        self.fitted = True
+
+    def predict(self, sigs: Dict[str, Signals]) -> Dict[str, float]:
+        if not self.fitted:
+            return {k: 0.5 for k in sigs.keys()}
+        keys = list(sigs.keys())
+        X = np.vstack([self.features(sigs[k]) for k in keys])
+        Xs = self.scaler.transform(X)
+        p = self.clf.predict_proba(Xs)[:,1]
+        return {keys[i]: float(p[i]) for i in range(len(keys))}
+
+
+
+###############################################################################
+### FILE: ranking/rrf.py
+###############################################################################
+# sr/ranking/rrf.py
+from __future__ import annotations
+from typing import Dict, List
+from sr.config.defaults import RRF_K
+
+def rrf_fuse(ranks: Dict[str, Dict[str, int]], k: int = RRF_K) -> Dict[str, float]:
+    """
+    ranks: pmid -> {list_name: rank_int (1-based)}
+    Return: pmid -> fused score (higher is better)
+    """
+    out: Dict[str, float] = {}
+    for pmid, comps in ranks.items():
+        s = 0.0
+        for _, r in comps.items():
+            if r <= 0: continue
+            s += 1.0 / (k + r)
+        out[pmid] = s
+    return out
+
+
+
+###############################################################################
+### FILE: ranking/signals.py
+###############################################################################
+# sr/ranking/signals.py
+from __future__ import annotations
+import math
+from typing import List, Dict, Tuple
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sr.config.schema import Record, Protocol, Signals
+from sr.llm.client import embed_texts
+
+def _text(rec: Record) -> str:
+    return f"{rec.title or ''}\n{rec.abstract or ''}".strip()
+
+def build_tfidf_corpus(records: List[Record]) -> Tuple[TfidfVectorizer, np.ndarray]:
+    vec = TfidfVectorizer(ngram_range=(1,3), lowercase=True, max_features=150000)
+    docs = [_text(r) for r in records]
+    X = vec.fit_transform(docs)
+    return vec, X
+
+def tfidf_query_cos(vec: TfidfVectorizer, X: np.ndarray, query_text: str) -> np.ndarray:
+    q = vec.transform([query_text])
+    denom = (np.linalg.norm(X.toarray(), axis=1) * (np.linalg.norm(q.toarray()) + 1e-12) + 1e-12)
+    sims = (X @ q.T).toarray().ravel() / denom
+    return sims.astype(float)
+
+def embed_cosine(records: List[Record], query: str) -> np.ndarray:
+    # Title-weight the query by repeating title
+    embs = embed_texts([query] + [ (r.title or "") + "\n" + (r.abstract or "") for r in records ])
+    qv = np.array(embs[0], dtype=np.float32)
+    qv /= (np.linalg.norm(qv) + 1e-12)
+    M = []
+    for i in range(1, len(embs)):
+        v = np.array(embs[i], dtype=np.float32)
+        v /= (np.linalg.norm(v) + 1e-12)
+        M.append(float(np.dot(qv, v)))
+    return np.array(M, dtype=float)
+
+def count_hits(text: str, syns: List[str]) -> int:
+    tl = (text or "").lower()
+    return sum(1 for s in syns if s.lower() in tl)
+
+PRIMARY_HINTS = {"Randomized Controlled Trial","Clinical Trial","Controlled Clinical Trial","Prospective Studies","Cohort Studies","Case-Control Studies"}
+
+def compute_signals(records: List[Record], proto: Protocol, tfidf_vec: TfidfVectorizer, X: np.ndarray, q_text: str) -> Dict[str, Signals]:
+    tf = tfidf_query_cos(tfidf_vec, X, q_text)
+    em = embed_cosine(records, q_text)
+
+    # recency scaled: linear from year_min to (current_year ~ 2025)
+    cur_year = 2025
+    ymin = proto.picos.year_min or (cur_year - 15)
+
+    out: Dict[str, Signals] = {}
+    for i, r in enumerate(records):
+        pit = count_hits(r.title or "", [proto.picos.population] + proto.picos.synonyms_population + [proto.picos.intervention] + proto.picos.synonyms_intervention)
+        pia = count_hits(r.abstract or "", [proto.picos.population] + proto.picos.synonyms_population + [proto.picos.intervention] + proto.picos.synonyms_intervention)
+        design_prior = 1.0 if (set(r.publication_types) & PRIMARY_HINTS) else 0.0
+        recency = 0.0
+        if r.year is not None:
+            recency = max(0.0, min(1.0, (r.year - ymin) / max(1, cur_year - ymin)))
+        out[r.pmid] = Signals(
+            pi_hits_title=pit,
+            pi_hits_abstract=pia,
+            tfidf_cos=float(tf[i]),
+            embed_cos=float(em[i]),
+            design_prior=design_prior,
+            recency_scaled=recency,
+            abstract_missing=(len((r.abstract or "").strip())==0)
+        )
+    return out
+
+
+
+###############################################################################
+### FILE: retrieval/dedupe.py
+###############################################################################
+# sr/retrieval/dedupe.py
+from __future__ import annotations
+from typing import List
+from sr.config.schema import Record
+
+def title_key(s: str) -> str:
+    return "".join(ch.lower() for ch in (s or "") if ch.isalnum() or ch.isspace()).strip()
+
+def dedupe(records: List[Record]) -> List[Record]:
+    seen_pmid=set(); seen_doi=set(); seen_title=set(); out=[]
+    for r in records:
+        if r.pmid and r.pmid in seen_pmid: continue
+        if r.doi and r.doi in seen_doi: continue
+        tk = title_key(r.title or "")
+        if tk and tk in seen_title: continue
+        out.append(r)
+        if r.pmid: seen_pmid.add(r.pmid)
+        if r.doi: seen_doi.add(r.doi)
+        if tk: seen_title.add(tk)
+    return out
+
+
+
+###############################################################################
+### FILE: retrieval/diary.py
+###############################################################################
+# sr/retrieval/diary.py
+from __future__ import annotations
+from typing import Dict, Any, List
+from sr.config.schema import SearchDiary
+
+class Diary:
+    def __init__(self):
+        self._q: List[Dict[str, Any]] = []
+        self._pages = 0
+        self._total = 0
+    def log_query(self, name: str, query: str):
+        self._q.append({"name": name, "query": query})
+    def log_pages(self, pages: int):
+        self._pages += int(pages)
+    def set_total(self, total_ids: int):
+        self._total = int(total_ids)
+    def snapshot(self) -> SearchDiary:
+        return SearchDiary(queries=self._q, pages=self._pages, total_ids=self._total)
+
+
+
+###############################################################################
+### FILE: retrieval/pubmed.py
+###############################################################################
+# sr/retrieval/pubmed.py
+from __future__ import annotations
+import requests, time, xml.etree.ElementTree as ET, re
+from typing import Dict, List, Optional, Any, Iterable
+from sr.config.defaults import ENTREZ_EMAIL, ENTREZ_API_KEY, HTTP_TIMEOUT, USER_AGENT, RETRIEVAL_PAGE_SIZE, RETRIEVAL_MAX_PAGES
+from sr.config.schema import Record
+
+EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+
+def esearch_paged(query: str, mindate: Optional[int]=None, maxdate: Optional[int]=None, db: str="pubmed") -> List[str]:
+    """Return a deduped list of PMIDs across pages. Gracefully handle 0 results."""
+    ids: List[str] = []
+    retmax = RETRIEVAL_PAGE_SIZE
+    params = {"db": db, "retmode": "json", "term": query, "retmax": retmax, "email": ENTREZ_EMAIL, "usehistory": "y"}
+    if ENTREZ_API_KEY: params["api_key"] = ENTREZ_API_KEY
+    if mindate: params["mindate"] = str(mindate)
+    if maxdate: params["maxdate"] = str(maxdate)
+
+    r = requests.get(f"{EUTILS}/esearch.fcgi", headers=HEADERS, params=params, timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    js = r.json().get("esearchresult", {})
+    count = int(js.get("count", "0"))
+    webenv = js.get("webenv", None)
+    query_key = js.get("querykey", None)
+
+    if count == 0 or not webenv or not query_key:
+        return []
+
+    fetched = 0
+    for page in range(RETRIEVAL_MAX_PAGES):
+        retstart = page * retmax
+        if retstart >= count:
+            break
+        p = {
+            "db": db, "retmode": "json", "retmax": retmax, "retstart": retstart,
+            "email": ENTREZ_EMAIL, "query_key": query_key, "WebEnv": webenv
+        }
+        if ENTREZ_API_KEY: p["api_key"] = ENTREZ_API_KEY
+        r2 = requests.get(f"{EUTILS}/esearch.fcgi", headers=HEADERS, params=p, timeout=HTTP_TIMEOUT)
+        r2.raise_for_status()
+        js2 = r2.json().get("esearchresult", {})
+        batch = js2.get("idlist", [])
+        ids.extend([str(x) for x in batch if x])
+        fetched += len(batch)
+        time.sleep(0.08)
+        if fetched >= count:
+            break
+    # dedupe, preserve order
+    seen=set(); out=[]
+    for i in ids:
+        if i not in seen:
+            out.append(i); seen.add(i)
+    return out
+
+def _parse_pubmed_xml(xml_text: str) -> Dict[str, Dict[str,Any]]:
+    out: Dict[str,Dict[str,Any]] = {}
+    root = ET.fromstring(xml_text)
+    def _join(node) -> str:
+        if node is None: return ""
+        try: return "".join(node.itertext())
+        except Exception: return (getattr(node, "text", None) or "")
+    for art in root.findall(".//PubmedArticle"):
+        pmid = art.findtext(".//PMID") or ""
+        title = _join(art.find(".//ArticleTitle")).strip()
+        abs_nodes = art.findall(".//Abstract/AbstractText")
+        abstract = " ".join(_join(n).strip() for n in abs_nodes) if abs_nodes else ""
+        year = None
+        for path in (".//ArticleDate/Year",".//PubDate/Year",".//DateCreated/Year",".//PubDate/MedlineDate"):
+            s = art.findtext(path)
+            if s:
+                m = re.search(r"\d{4}", s)
+                if m: year = int(m.group(0)); break
+        lang = art.findtext(".//Language") or None
+        pubtypes = [pt.text for pt in art.findall(".//PublicationTypeList/PublicationType") if pt.text]
+        doi = None
+        for idn in art.findall(".//ArticleIdList/ArticleId"):
+            if (idn.attrib.get("IdType","").lower()=="doi") and idn.text:
+                doi = idn.text.strip().lower()
+        out[pmid] = {"pmid": pmid, "title": title, "abstract": abstract, "year": year,
+                     "language": lang, "publication_types": pubtypes, "doi": doi, "source":"retrieval"}
+    return out
+
+def efetch_abstracts(pmids: Iterable[str], chunk: int = 200, workers: int = 1) -> Dict[str, Dict[str,Any]]:
+    # Simple sequential to reduce edge cases; you can parallelize later.
+    pmids = [str(p) for p in pmids if p]
+    if not pmids: return {}
+    results: Dict[str,Dict[str,Any]] = {}
+    for i in range(0, len(pmids), chunk):
+        sub = pmids[i:i+chunk]
+        params = {"db":"pubmed", "retmode":"xml", "rettype":"abstract", "id":",".join(sub), "email":ENTREZ_EMAIL}
+        if ENTREZ_API_KEY: params["api_key"] = ENTREZ_API_KEY
+        r = requests.get(f"{EUTILS}/efetch.fcgi", headers={"User-Agent": USER_AGENT}, params=params, timeout=HTTP_TIMEOUT)
+        r.raise_for_status()
+        results.update(_parse_pubmed_xml(r.text))
+        time.sleep(0.08)
+    return results
+
+def to_records(raw: Dict[str, Dict[str,Any]]) -> List[Record]:
+    out: List[Record] = []
+    for p, rec in raw.items():
+        try:
+            out.append(Record(**rec))
+        except Exception:
+            # skip malformed
+            continue
+    return out
+
+
+
+###############################################################################
+### FILE: screen/aggregate.py
+###############################################################################
+# sr/screen/aggregate.py
+from __future__ import annotations
+from typing import List
+from sr.config.schema import PassAResult, PassBResult, PassCResult, FinalDecision, Record, Protocol, RRFScore, Reason
+from sr.screen.verify import quotes_ok as _quotes_ok, design_ok as _design_ok
+
+def dissonant(a: PassAResult, rrf_score: float, ees_score: float | None, low_rrf_thresh: float = 0.05) -> bool:
+    # Example: Include but bottom RRF decile -> suspicious
+    if a.decision == "include" and rrf_score < low_rrf_thresh:
+        return True
+    return False
+
+def aggregate(proto: Protocol, rec: Record, rrf: RRFScore, a: PassAResult, b: PassBResult | None, c: PassCResult | None) -> FinalDecision:
+    q_ok = _quotes_ok(rec, a)
+    d_ok = _design_ok(rec, proto)
+    passes = ["A"] + (["B"] if b else []) + (["C"] if c else [])
+
+    # Consensus logic
+    final_decision = a.decision
+    final_conf = a.confidence
+    final_reason: Reason = a.reason
+
+    if b and b.stance == "challenge":
+        if not c:
+            # Without C, downgrade to borderline unless hard mismatch
+            if a.reason in ("admin","language","year","animal_preclinical","design_ineligible"):
+                final_decision = "exclude"
+            else:
+                final_decision = "borderline"
+        else:
+            final_decision = c.decision
+            final_reason = c.reasons[0] if c.reasons else a.reason
+            final_conf = c.confidence
+
+    # Acceptance contract
+    if final_decision == "include":
+        if not (q_ok and d_ok and final_conf >= proto.accept_confidence_tau):
+            final = "borderline"
+        else:
+            final = "include_for_full_text"
+    elif final_decision == "exclude":
+        final = "exclude"
+    else:
+        final = "borderline"
+
+    # Justification policy
+    justification = a.justification_short
+    if final == "exclude" and a.reason in ("admin","language","year","animal_preclinical"):
+        # templated is fine, already provided
+        pass
+
+    return FinalDecision(
+        pmid=rec.pmid, final=final, reason=final_reason, justification=justification,
+        quotes_ok=q_ok, design_ok=d_ok, passes_triggered=passes, rrf=rrf
+    )
+
+
+
+###############################################################################
+### FILE: screen/gates.py
+###############################################################################
+# sr/screen/gates.py
+from __future__ import annotations
+from typing import Optional, Tuple
+from sr.config.schema import Record, Protocol, Reason
+
+ADMIN = {"Editorial","Letter","Comment","News","Interview","Published Erratum","Retraction of Publication","Retracted Publication","Expression of Concern","Newspaper Article","Congresses"}
+ADJUNCT = {"Review","Meta-Analysis","Practice Guideline","Guideline","Case Reports"}
+ANIMAL_HINTS = {"rat","mouse","mice","murine","canine","porcine","pig","rabbit","zebrafish","in vitro","rodent"}
+
+def language_ok(rec_lang: Optional[str], allowed: list[str]) -> bool:
+    if not rec_lang or not allowed: return True
+    rl= (rec_lang or "").strip().lower()
+    return any(rl==a.strip().lower() for a in allowed)
+
+def title_animal_offtopic(title: str) -> Optional[Reason]:
+    tl= (title or "").lower()
+    if any(tok in tl for tok in ANIMAL_HINTS): return "animal_preclinical"
+    return None
+
+def apply_gates(rec: Record, proto: Protocol) -> Optional[Tuple[Reason,str]]:
+    # Year (already gated at retrieval typically, but keep)
+    if proto.picos.year_min and rec.year is not None and rec.year < int(proto.picos.year_min):
+        return ("year","year below protocol")
+    # Language
+    if proto.picos.languages and rec.language and not language_ok(rec.language, proto.picos.languages):
+        return ("language","language outside protocol")
+    # Missing both title and abstract
+    if not ((rec.title or "").strip() or (rec.abstract or "").strip()):
+        return ("insufficient_info","missing title and abstract")
+    # Admin
+    if set(rec.publication_types) & ADMIN:
+        return ("admin","administrative/non-research type")
+    # Adjunct families dropped for effects triage
+    if proto.drop_adjuncts and (set(rec.publication_types) & ADJUNCT):
+        return ("design_ineligible","adjunct family (review/meta/guideline/case report)")
+    # Animals/obvious off-topic (title-only cautious)
+    t_reason = title_animal_offtopic(rec.title or "")
+    if t_reason:
+        return (t_reason, "animal/preclinical hint in title")
+    return None
+
+
+
+###############################################################################
+### FILE: screen/passes.py
+###############################################################################
+# sr/screen/passes.py
+from __future__ import annotations
+import json
+from typing import Optional
+from sr.llm.client import chat_json
+from sr.llm.prompts import PASS_A_SYSTEM, pass_a_user, PASS_B_SYSTEM, pass_b_user, PASS_C_SYSTEM, pass_c_user
+from sr.config.schema import Protocol, Record, PassAResult, PassBResult, PassCResult
+
+_PASS_A_TEMPLATE = """{
+  "pmid": "",
+  "decision": "borderline",
+  "confidence": 0.0,
+  "reason": "off_topic",
+  "population_quote": "",
+  "intervention_quote": "",
+  "design_evidence": "",
+  "justification_short": ""
+}"""
+
+def pass_a(proto: Protocol, rec: Record) -> PassAResult:
+    pj = proto.model_dump_json()
+    rj = rec.model_dump_json()
+    res = chat_json(
+        PASS_A_SYSTEM,
+        pass_a_user(pj, rj),
+        schema_model=PassAResult,
+        temperature=0.0,
+        max_tokens=700,
+        template_for_repair=_PASS_A_TEMPLATE,   # <— repair if shapes drift
+    )
+    assert isinstance(res, PassAResult)
+    if not res.pmid:
+        res.pmid = rec.pmid
+    return res
+
+def pass_b(proto: Protocol, rec: Record, a: PassAResult, trigger_note: str) -> PassBResult:
+    pj = proto.model_dump_json()
+    rj = rec.model_dump_json()
+    aj = a.model_dump_json()
+    res = chat_json(PASS_B_SYSTEM, pass_b_user(pj, rj, aj, trigger_note), schema_model=PassBResult, temperature=0.0, max_tokens=600)
+    assert isinstance(res, PassBResult)
+    if not res.pmid:
+        res.pmid = rec.pmid
+    return res
+
+def pass_c(proto: Protocol, rec: Record, a: PassAResult, b: PassBResult) -> PassCResult:
+    pj = proto.model_dump_json()
+    rj = rec.model_dump_json()
+    aj = a.model_dump_json()
+    bj = b.model_dump_json()
+    res = chat_json(PASS_C_SYSTEM, pass_c_user(pj, rj, aj, bj), schema_model=PassCResult, temperature=0.0, max_tokens=700)
+    assert isinstance(res, PassCResult)
+    if not res.pmid:
+        res.pmid = rec.pmid
+    return res
+
+
+
+###############################################################################
+### FILE: screen/verify.py
+###############################################################################
+# sr/screen/verify.py
+from __future__ import annotations
+from sr.config.schema import Record, PassAResult, Protocol
+
+def _verbatim(hay: str, needle: str) -> bool:
+    if not needle.strip(): return False
+    return needle.strip() in (hay or "")
+
+def quotes_ok(rec: Record, a: PassAResult) -> bool:
+    hay = f"{rec.title or ''}\n{rec.abstract or ''}"
+    ok_p = _verbatim(hay, a.population_quote)
+    ok_i = _verbatim(hay, a.intervention_quote)
+    return ok_p and ok_i
+
+def design_ok(rec: Record, proto: Protocol) -> bool:
+    if not proto.allowed_designs:
+        return True
+    return bool(set(rec.publication_types) & set(proto.allowed_designs))
+
+
+

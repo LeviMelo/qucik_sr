@@ -1,0 +1,24 @@
+{
+  "id": "chatcmpl-mawttc2soheuhb1c54cqt",
+  "object": "chat.completion",
+  "created": 1757564237,
+  "model": "qwen/qwen3-4b",
+  "choices": [
+    {
+      "index": 0,
+      "logprobs": null,
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "<think>\nOkay, the user wants me to return a JSON object with at least two key-value pairs. The example they provided has \"hello\": \"world\", so I need to add another pair.\n\nFirst, I should make sure the JSON is valid. Let me think of another key and value. Maybe \"key2\": \"value2\"? That would work. Let me check if that's correct. Yes, as long as the syntax is right with commas and quotes.\n\nWait, the user said exactly one JSON object between BEGIN_JSON and END_JSON. So I need to make sure there's only one object. Also, no other text outside the markers. Let me structure it properly. The example has two lines with the tags. So my response should be similar.\n\nI'll write {\"hello\": \"world\", \"key2\": \"value2\"} inside the BEGIN_JSON and END_JSON. That should meet the requirements. Two key-value pairs, valid JSON, no extra text. Looks good.\n</think>\n\nBEGIN_JSON\n{\"hello\":\"world\",\"key2\":\"value2\"}\nEND_JSON"
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 50,
+    "completion_tokens": 218,
+    "total_tokens": 268
+  },
+  "stats": {},
+  "system_fingerprint": "qwen/qwen3-4b"
+}

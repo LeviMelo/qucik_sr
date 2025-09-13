@@ -1,0 +1,106 @@
+{
+  "publication_types_allowable": [
+    "Randomized Controlled Trial",
+    "Controlled Clinical Trial",
+    "Clinical Trial",
+    "Comparative Study",
+    "Cohort Studies",
+    "Case-Control Studies",
+    "Observational Study",
+    "Multicenter Study",
+    "Cross-Sectional Studies",
+    "Clinical Trial Protocol",
+    "Evaluation Study"
+  ],
+  "publication_types_hard_exclude": [
+    "Editorial",
+    "Letter",
+    "Comment",
+    "News",
+    "Interview",
+    "Practice Guideline",
+    "Guideline",
+    "Consensus Development Conference",
+    "Case Reports"
+  ],
+  "languages": [
+    "english",
+    "spanish",
+    "portuguese"
+  ],
+  "designs_primary": [
+    "Randomized Controlled Trial",
+    "Controlled Clinical Trial",
+    "Clinical Trial"
+  ],
+  "designs_secondary": [
+    "Comparative Study",
+    "Cohort Studies",
+    "Case-Control Studies",
+    "Observational Study",
+    "Multicenter Study",
+    "Evaluation Study"
+  ],
+  "pubtype_aliases": {
+    "Randomized Controlled Trial": [
+      "Randomized Controlled Trial"
+    ],
+    "Controlled Clinical Trial": [
+      "Controlled Clinical Trial"
+    ],
+    "Clinical Trial": [
+      "Clinical Trial"
+    ],
+    "Comparative Study": [
+      "Comparative Study"
+    ],
+    "Cohort Studies": [
+      "Cohort Studies",
+      "Prospective Studies",
+      "Retrospective Studies"
+    ],
+    "Case-Control Studies": [
+      "Case-Control Studies"
+    ],
+    "Observational Study": [
+      "Observational Study"
+    ],
+    "Multicenter Study": [
+      "Multicenter Study"
+    ],
+    "Cross-Sectional Studies": [
+      "Cross-Sectional Studies"
+    ],
+    "Clinical Trial Protocol": [
+      "Clinical Trial Protocol",
+      "Study Protocols"
+    ],
+    "Evaluation Study": [
+      "Evaluation Study"
+    ]
+  },
+  "publication_types": [
+    "Randomized Controlled Trial",
+    "Controlled Clinical Trial",
+    "Clinical Trial",
+    "Comparative Study",
+    "Cohort Studies",
+    "Case-Control Studies",
+    "Multicenter Study",
+    "Pragmatic Clinical Trial"
+  ],
+  "design_ptype_map": {
+    "Randomized Controlled Trial": [
+      "Randomized Controlled Trial",
+      "Controlled Clinical Trial"
+    ],
+    "Comparative Study": [
+      "Comparative Study",
+      "Cohort Studies",
+      "Case-Control Studies",
+      "Clinical Trial",
+      "Multicenter Study",
+      "Pragmatic Clinical Trial"
+    ]
+  }
+}

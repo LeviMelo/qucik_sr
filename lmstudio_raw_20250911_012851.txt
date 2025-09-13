@@ -1,0 +1,24 @@
+{
+  "id": "chatcmpl-4cqgoqakbvo0rdi3qtzlf8l",
+  "object": "chat.completion",
+  "created": 1757564914,
+  "model": "qwen/qwen3-4b",
+  "choices": [
+    {
+      "index": 0,
+      "logprobs": null,
+      "finish_reason": "length",
+      "message": {
+        "role": "assistant",
+        "content": "<think>\nOkay, let's tackle this query. The user wants me to extract biomedical terms from the given NLQ. First, I need to understand each section: population, intervention, comparators, outcomes, must_have, and avoid.\n\nStarting with population. The NLQ says adults undergoing minimally invasive repair of pectus excavatum (Nuss/MIRPE). So synonyms for that. MIRPE and Nuss are already mentioned. Maybe \"adults with pectus excavatum\" or \"patients undergoing minimally invasive pectus repair\". Also, \"postoperative\" might be relevant since it's about after surgery. But wait, the example in the template includes \"adults undergoing minimally invasive repair of pectus excavatum (Nuss/MIRPE)\", so maybe I should include that exact phrase. But the user says to use standard terms and common acronyms. So perhaps \"adults with pectus excavatum\" and \"Nuss procedure\" as alternatives.\n\nNext, intervention is intercostal nerve cryoablation (INC) used intraoperatively for analgesia during Nuss/MIRPE. The example includes \"cryoanalgesia\", \"INC\", and \"intercostal nerve cryoablation\". Also, maybe \"intraoperative cryoablation\" or \"anesthetic cryoablation\"? But the key terms here are INC and cryoablation. So the must_have would include MIRPE, Nuss, cryoablation as per the example.\n\nComparators are listed as thoracic epidural, paravertebral block, intercostal nerve block, erector spinae plane block, systemic multimodal analgesia. The user says to include common variants, so maybe \"thoracic epidural anesthesia\" or \"paravertebral blockade\". But the original list has those exact terms, so I should stick to them.\n\nOutcomes are postoperative opioid consumption"
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 563,
+    "completion_tokens": 399,
+    "total_tokens": 962
+  },
+  "stats": {},
+  "system_fingerprint": "qwen/qwen3-4b"
+}

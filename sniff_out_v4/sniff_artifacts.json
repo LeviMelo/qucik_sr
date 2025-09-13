@@ -1,0 +1,96 @@
+{
+  "locked_protocol": {
+    "narrative_question": "Children/adolescents undergoing minimally invasive repair of pectus excavatum (Nuss/MIRPE) receiving intercostal nerve cryoablation (INC) intraoperatively for analgesia, compared to thoracic epidural, paravertebral block, intercostal nerve block, erector spinae plane block, or systemic multimodal analgesia, for postoperative opioid consumption and pain scores.",
+    "inclusion_criteria": [
+      "children/adolescents undergoing minimally invasive repair of pectus excavatum (Nuss/MIRPE)",
+      "intercostal nerve cryoablation (INC) used intraoperatively for analgesia during Nuss/MIRPE",
+      "thoracic epidural, paravertebral block, intercostal nerve block, erector spinae plane block, or systemic multimodal analgesia",
+      "postoperative opioid consumption (in-hospital and at discharge)",
+      "pain scores"
+    ],
+    "exclusion_criteria": [],
+    "screening_rules_note": {
+      "user_notes": "Be conservative; INCLUDE if P & I present and (O or D) is present; do not exclude for lack of exact day window if acute postop outcomes are clearly reported.",
+      "llm_guidance": "Strictly follow user instructions for inclusion/exclusion logic."
+    },
+    "pico_tokens": {
+      "P": [
+        "children adolescents minimally invasive",
+        "nuss/mirpe"
+      ],
+      "I": [
+        "intercostal nerve cryoablation analgesia",
+        "inc"
+      ],
+      "C": [
+        "thoracic epidural",
+        "paravertebral block",
+        "intercostal nerve block",
+        "erector spinae plane block",
+        "systemic multimodal analgesia"
+      ],
+      "O": [
+        "opioid",
+        "in-hospital and at discharge",
+        "pain scores"
+      ]
+    },
+    "anchors_must_have": [
+      "children/adolescents undergoing minimally invasive",
+      "intercostal nerve cryoablation (INC)",
+      "thoracic epidural",
+      "paravertebral block",
+      "intercostal nerve block",
+      "erector spinae plane block",
+      "systemic multimodal analgesia",
+      "postoperative opioid consumption (in-hospital",
+      "pain scores"
+    ],
+    "avoid_terms": [],
+    "designs_preference": "Randomized Controlled Trial",
+    "deterministic_filters": {
+      "languages": [
+        "english",
+        "spanish",
+        "portuguese",
+        "french",
+        "german",
+        "italian",
+        "chinese",
+        "japanese",
+        "korean"
+      ],
+      "year_min": 2000
+    },
+    "designs_allowed": [
+      "Randomized Controlled Trial",
+      "Comparative Study",
+      "Cohort Studies",
+      "Case-Control Studies",
+      "Observational Study"
+    ],
+    "publication_types_allowlist": [],
+    "publication_types_blocklist": []
+  },
+  "universe_baseline_query": "(\"children adolescents minimally invasive\"[tiab] OR nuss/mirpe[tiab]) AND (\"intercostal nerve cryoablation analgesia\"[tiab] OR inc[tiab]) AND (\"children/adolescents undergoing minimally invasive\"[tiab] OR \"intercostal nerve cryoablation (INC)\"[tiab] OR \"thoracic epidural\"[tiab] OR \"paravertebral block\"[tiab] OR \"intercostal nerve block\"[tiab] OR \"erector spinae plane block\"[tiab] OR \"systemic multimodal analgesia\"[tiab] OR \"postoperative opioid consumption (in-hospital\"[tiab] OR \"pain scores\"[tiab])",
+  "recommended_filters": {
+    "topic_filter": "",
+    "design_filter": "\"Randomized Controlled Trial\"[Publication Type]"
+  },
+  "ground_truth_pmids": [
+    "40818798"
+  ],
+  "includes_pmids": [
+    "40818798"
+  ],
+  "mesh_vernacular": {
+    "P": [],
+    "I": [],
+    "C": [],
+    "O": [],
+    "G": []
+  },
+  "warnings": [
+    "Insufficient confirmed includes after plausibility (0<3)."
+  ]
+}

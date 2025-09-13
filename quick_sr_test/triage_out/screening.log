@@ -1,0 +1,26 @@
+# 2025-09-13T06:14:16.017796Z triage_stage1_candidates.csv -> s1_llm_screen.jsonl
+screen	pmid=37663669	label=include	conf=0.95	reason=Systematic review comparing ESPB vs. PVB for acute analgesia
+screen	pmid=37233969	label=include	conf=0.95	reason=RCT comparing ESPB+SAPB vs. TPVB for postoperative analgesia
+screen	pmid=37671541	label=include	conf=0.95	reason=Systematic review & meta-analysis comparing ESPB vs. PVB for
+screen	pmid=34301447	label=include	conf=0.95	reason=Systematic review & meta-analysis directly addresses the res
+screen	pmid=37891645	label=include	conf=0.95	reason=Meta-analysis comparing ESPB and PVB for pain & opioid use p
+screen	pmid=35766959	label=include	conf=0.95	reason=RCT comparing ESPB, SAPB, and TPVB for acute pain after VATS
+screen	pmid=32417925	label=include	conf=0.95	reason=RCT comparing ESPB and SAPB for pain management post-VATS. A
+screen	pmid=35249833	label=include	conf=0.95	reason=RCT comparing ESPB and C-SAPB for acute pain after VATS. Add
+screen	pmid=37408302	label=include	conf=0.95	reason=RCT comparing ESPB, SAPB, and TPVB for analgesic efficacy &
+screen	pmid=38878034	label=include	conf=0.95	reason=RCT comparing ESPB and TPVB for analgesic efficacy & safety
+screen	pmid=36088297	label=include	conf=0.95	reason=RCT comparing ESPB, SAPB, and TPVB/PVB for pain & safety aft
+screen	pmid=34432822	label=include	conf=0.95	reason=Meta-analysis comparing PVB vs ESPB for thoracic/breast surg
+screen	pmid=38041029	label=include	conf=0.95	reason=RCT comparing ESPB and SAPB for postoperative analgesia afte
+screen	pmid=36109206	label=include	conf=0.95	reason=RCT comparing ESPB and PVB for analgesic efficacy & safety p
+screen	pmid=40211141	label=include	conf=0.95	reason=RCT comparing ESPB + SAPB vs. saline after thoracoscopic sur
+screen	pmid=33483269	label=include	conf=0.95	reason=RCT comparing ESPB, SAPB, and thoracic epidural for postoper
+screen	pmid=33358107	label=include	conf=0.95	reason=RCT comparing ESPB, SAPB, and TPVB for pain & opioid use pos
+screen	pmid=39621976	label=include	conf=0.95	reason=Systematic review comparing ESPB, SAPB, and TPVB for thoraci
+screen	pmid=39939956	label=include	conf=0.95	reason=RCT comparing ESPB, SAPB, and TPVB for postoperative analges
+screen	pmid=32502778	label=include	conf=0.95	reason=Systematic review comparing ESPB, SAPB, and TPVB for thoraci
+screen	pmid=36288578	label=include	conf=0.95	reason=Systematic review comparing ESPB, SAPB, and TPVB for postope
+screen	pmid=32660716	label=include	conf=0.95	reason=RCT comparing ESPB vs SAPB for analgesic efficacy & safety i
+screen	pmid=32092617	label=include	conf=0.95	reason=RCT comparing ESPB and PVB for analgesic efficacy & safety p
+screen	pmid=35361015	label=include	conf=0.95	reason=Systematic review & meta-analysis comparing different periph
+screen	pmid=31330457	label=include	conf=0.95	reason=RCT comparing ESPB, SAPB, and TPVB for postoperative analges

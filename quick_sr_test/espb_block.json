@@ -1,0 +1,95 @@
+{
+  "narrative_question": "In adults undergoing thoracic surgery (thoracotomy or VATS), how does the erector spinae plane block (ESPB) compare with serratus anterior plane block (SAPB) and thoracic paravertebral block (TPVB/PVB) for acute analgesic efficacy and safety (opioid consumption, pain scores, PONV, complications), and what is the impact on chronic postsurgical pain?",
+  "year_min": 2020,
+  "year_max": 2025,
+
+  "designs_allowlist": [
+    "Randomized Controlled Trial",
+    "Clinical Trial",
+    "Pragmatic Clinical Trial",
+    "Meta-Analysis",
+    "Systematic Review"
+  ],
+  "pubtype_blocklist": [
+    "Editorial",
+    "Letter",
+    "Comment",
+    "Case Reports",
+    "News"
+  ],
+
+  "mandatory_blocks": ["C", "O"],
+
+  "P_terms": [
+    "Thoracic Surgical Procedures",
+    "thoracic surgery",
+    "VATS",
+    "video-assisted thoracoscopic surgery",
+    "thoracotomy",
+    "thoracoscopy",
+    "lung resection",
+    "lobectomy",
+    "segmentectomy",
+    "wedge resection",
+    "pleurectomy",
+    "decortication"
+  ],
+
+  "I_terms": [
+    "erector spinae plane block",
+    "ESPB",
+    "erector spinae block",
+    "erector spinae plane"
+  ],
+
+  "C_terms": [
+    "serratus anterior plane block",
+    "SAPB",
+    "paravertebral block",
+    "thoracic paravertebral block",
+    "TPVB",
+    "PVB"
+  ],
+
+  "O_terms": [
+    "opioid consumption",
+    "morphine consumption",
+    "morphine milligram equivalents",
+    "pain score",
+    "numeric rating scale",
+    "visual analogue scale",
+    "postoperative nausea and vomiting",
+    "PONV",
+    "chronic postsurgical pain",
+    "chronic pain",
+    "rescue analgesia",
+    "time to first analgesic",
+    "length of stay",
+    "respiratory complications",
+    "pulmonary complications",
+    "adverse events",
+    "pneumothorax"
+  ],
+
+  "key_pmids": [],
+
+  "query_targets": {
+    "TARGET_MIN": 100,
+    "TARGET_MAX": 800,
+    "UNIVERSE_FETCH_MAX": 3000
+  },
+
+  "screening": {
+    "llm_screen_cap_threshold": 1000,
+    "yield_window": 50,
+    "yield_min_rate": 0.10,
+    "yield_consecutive": 2
+  },
+
+  "llm": {
+    "embed_endpoint": "http://localhost:1234/v1/embeddings",
+    "embed_model": "text-embedding-qwen3-embedding-0.6b@f16",
+    "chat_endpoint": "http://localhost:1234/v1/chat/completions",
+    "chat_model": "gemma-3n-e4b-it@q5_k_m"
+  }
+}
