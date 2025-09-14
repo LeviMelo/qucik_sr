@@ -1,0 +1,34 @@
+{
+  "queries": [],
+  "queries_total": 0,
+  "prefilter_summary": {
+    "universe_raw": 245,
+    "year_fail": 0,
+    "pubtype_blocked": 45,
+    "design_fail": 140,
+    "kept": 95
+  },
+  "prefilter_kept": 95,
+  "stage1_screen": {
+    "n": 95,
+    "include_maybe": 31,
+    "exclude": 64
+  },
+  "stage2_screen": {
+    "n": 1,
+    "include_maybe": 1,
+    "exclude": 0
+  },
+  "snowballing_identified_raw": 23,
+  "snowballing_pass_prefilter": 1,
+  "fulltext_pdfs_fetched": 18,
+  "fulltext_screen_included": 11,
+  "fulltext_excluded_by_reason": {
+    "PT": 5,
+    "PT|POP|INT|OUT|OTHER": 1,
+    "PT|POP|INT|OUT|DUP|OTHER": 1
+  },
+  "identification_total": 0,
+  "screened_tiab": 96,
+  "included_fulltext": 11
+}

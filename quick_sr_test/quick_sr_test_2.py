@@ -225,8 +225,10 @@ def _parse_pubmed_xml(xml_text: str) -> List[dict]:
         doi_node = art.find(".//ArticleIdList/ArticleId[@IdType='doi']")
         if doi_node is None:
             doi_node = art.find(".//ELocationID[@EIdType='doi'][@ValidYN='Y']")
-        if doi_node is not None and (doi_node.text or "").strip():
-            doi = doi_node.text.strip()
+        if doi_node is not None:
+            doi_text = doi_node.text if hasattr(doi_node, "text") else None
+            doi_clean = (doi_text or "").strip()
+            doi = doi_clean or None
         items.append({
             "pmid": pmid, "title": title, "abstract": abstract,
             "year": year, "pubtypes": pubtypes, "mesh": mesh,
@@ -541,25 +543,210 @@ def fetch_universe(proto: Protocol, queries: List[str]) -> List[dict]:
 # ----------------------------
 # CELL 7 — MeSH mining & curation via LLM
 # ----------------------------
-def llm_chat(endpoint: str, model: str, system_prompt: str, user_prompt: str, temperature: float=0.0) -> str:
+
+def llm_chat(
+    endpoint: str,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float = 0.0,
+    timeout_s: int = 60,
+    max_retries: int = 4,
+    api_key_env: str = "OPENAI_API_KEY",
+    log_path: Optional[str] = None,
+    stream: bool = True,              # <- new, default off (so nothing else changes) # Default True so that we dont cutoff midgen
+    idle_timeout_s: int = 5,          # <- only used when stream=True
+    continuation_retry: int = 1,       # <- try to finish a cut-off JSON once
+) -> str:
+    import os, requests, time, json, re
+    headers = {"Content-Type": "application/json", "Connection": "keep-alive", "Accept": "text/event-stream"}
+    api_key = os.getenv(api_key_env)
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    def _post(payload, stream_flag):
+        # separate connect/read; short read timeout so we don't block forever
+        # keep connect at 10s; read at max(idle_timeout_s, 30) to allow slow models
+        tout = (10, max(idle_timeout_s, 30)) if stream_flag else timeout_s
+        return requests.post(endpoint, json=payload, headers=headers, timeout=tout, stream=stream_flag)
+
+
+    def _assemble_stream(payload) -> str:
+        import requests, time, json
+        r = _post(payload, True)
+        r.raise_for_status()
+        parts = []
+        last = time.monotonic()
+        try:
+            # chunk_size=1 makes lines flush quickly when server pushes small deltas
+            for line in r.iter_lines(decode_unicode=True, chunk_size=1):
+                now = time.monotonic()
+                if line:
+                    last = now
+                    if line.startswith("data:"):
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            j = json.loads(data)
+                            ch = j.get("choices", [{}])[0]
+                            delta = ch.get("delta", {}).get("content")
+                            if delta:
+                                parts.append(delta)
+                            else:
+                                msg = ch.get("message", {}).get("content")
+                                if msg:
+                                    parts.append(msg)
+                            # stop if finish_reason is sent
+                            if str(ch.get("finish_reason") or "").lower() == "stop":
+                                break
+                        except Exception:
+                            # ignore malformed SSE line; keep going
+                            pass
+                # (optional) idle watchdog is now just a safety net; read timeout handles hard block
+                if idle_timeout_s and (now - last) > idle_timeout_s:
+                    break
+        except requests.exceptions.ReadTimeout:
+            # Treat as graceful end-of-stream: we return whatever we buffered
+            pass
+        finally:
+            try:
+                r.close()
+            except Exception:
+                pass
+        return "".join(parts).strip()
+
+
+    def _finish_suffix(prefix_text: str) -> str:
+        # Ask model to output ONLY the remaining suffix to complete the JSON object.
+        # We include the tail of what we’ve already got for alignment.
+        tail = prefix_text[-400:] if prefix_text else ""
+        cont_user = json.dumps({
+            "instruction": (
+                "Continue emitting EXACTLY the remaining characters to complete the same JSON object. "
+                "Do NOT repeat prior content. Do NOT add code fences or commentary. "
+                "Start immediately with the next character."
+            ),
+            "already_emitted_tail": tail
+        }, ensure_ascii=False)
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": cont_user}
+            ],
+            "temperature": temperature,
+            "stream": True
+        }
+        suffix = _assemble_stream(payload)
+        return prefix_text + suffix
+
     payload = {
         "model": model,
         "messages": [
-            {"role":"system","content":system_prompt},
-            {"role":"user","content":user_prompt}
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt}
         ],
         "temperature": temperature,
-        "stream": False
+        "stream": bool(stream),
     }
-    for _ in range(LM_RETRY):
+
+    last_status, last_text, last_err = None, None, None
+    backoff = 1.0
+    for _ in range(max_retries):
         try:
-            r = requests.post(endpoint, json=payload, timeout=LM_TIMEOUT)
-            r.raise_for_status()
-            data = r.json()
-            return data["choices"][0]["message"]["content"]
+            if stream:
+                text = _assemble_stream(payload)
+                # If we seem cut off and a continuation is allowed, try to finish once
+                if continuation_retry > 0:
+                    # quick check: do we already have a {} JSON object somewhere?
+                    if not re.search(r"\{.*\}", text, re.S):
+                        text2 = _finish_suffix(text)
+                        # prefer the longer candidate
+                        if len(text2) > len(text):
+                            text = text2
+                if text:
+                    return text
+                last_text = "(empty stream)"
+            else:
+                r = _post(payload, False)
+                last_status, last_text = r.status_code, r.text[:3000]
+                if r.status_code == 200:
+                    j = r.json()
+                    return j["choices"][0]["message"]["content"]
+
+            if last_status in (429, 500, 502, 503, 504):
+                time.sleep(backoff); backoff *= 1.7; continue
+            break
         except Exception as e:
-            time.sleep(0.8)
+            last_err = f"{e.__class__.__name__}: {e}"
+            time.sleep(backoff); backoff *= 1.7
+
+    if log_path:
+        _append_lines(log_path, [f"LLM_FAIL status={last_status} err={last_err} body={last_text}"])
     raise RuntimeError("LLM chat failed after retries")
+
+
+
+EXCL_CODES = ["PT","POP","INT","OUT","DUP","OTHER"]  # publication type/design, population, intervention, outcome, duplicate, other
+
+STRICT_SCREEN_SCHEMA = {
+    "label": ["include","exclude","maybe"],
+    "conf": float,
+    "reason": str,
+    "P": bool, "I": bool, "C": bool, "O": bool,
+    "design_ok": bool, "pubtype_ok": bool, "year_ok": bool,
+    "mesh_hits": list, "salient_terms": list,
+    "pris_ref": str,
+    "excl_code": str,   # pipe-joined codes e.g. "PT|POP"
+}
+
+def _ensure_schema(obj: dict, pris_ref: str, allow_maybe: bool=True) -> dict:
+    # defaults
+    base = {
+        "label": "exclude",
+        "conf": 0.0,
+        "reason": "unspecified",
+        "P": False, "I": False, "C": False, "O": False,
+        "design_ok": False, "pubtype_ok": False, "year_ok": False,
+        "mesh_hits": [], "salient_terms": [],
+        "pris_ref": pris_ref,
+        "excl_code": "OTHER",
+    }
+    base.update({k: obj.get(k, base[k]) for k in base.keys()})
+    # clamp fields
+    if base["label"] not in (["include","exclude","maybe"] if allow_maybe else ["include","exclude"]):
+        base["label"] = "exclude"
+    try:
+        base["conf"] = float(base["conf"])
+    except Exception:
+        base["conf"] = 0.0
+    # normalize excl_code
+    codes = []
+    for tok in str(base.get("excl_code","OTHER")).upper().split("|"):
+        tok = tok.strip()
+        if tok in EXCL_CODES and tok not in codes:
+            codes.append(tok)
+    if not codes:
+        codes = ["OTHER"]
+    base["excl_code"] = "|".join(codes)
+    return base
+
+def _heuristic_excl_code(reason: str) -> str:
+    r = (reason or "").lower()
+    hits=[]
+    if any(k in r for k in ["case report","protocol","review","letter","editorial","animal","cadaver","simulation","in vitro"]):
+        hits.append("PT")
+    if any(k in r for k in ["pediatric","neonate","rat","dog","non-thoracic","non-vats","urology","orthopedic"]):
+        hits.append("POP")
+    if any(k in r for k in ["not espb","wrong block","no block","no comparator","no sapb","not tpvb","epidural only"]):
+        hits.append("INT")
+    if any(k in r for k in ["no pain","no opioid","outcome not","no ponv","no complication data"]):
+        hits.append("OUT")
+    if any(k in r for k in ["duplicate","duplication","already included","same cohort"]):
+        hits.append("DUP")
+    return "|".join(hits) if hits else "OTHER"
+
 
 def curate_mesh(proto: Protocol, base_pmids: List[int], universe: List[dict], stage: int=1) -> Dict[str,List[str]]:
     # collect MeSH from key_pmids (stage-1), optionally from stage-1 includes for stage-2
@@ -571,38 +758,64 @@ def curate_mesh(proto: Protocol, base_pmids: List[int], universe: List[dict], st
     mesh_terms = list(dict.fromkeys([m for m in mesh_terms if m]))
 
     sys_prompt = (
-        'You are curating MeSH terms into P/I/C/O for a systematic review. Output strict JSON only.\n'
-        'Return ONLY valid JSON (no markdown/code fences) with EXACTLY these keys:\n'
-        '{"P":[],"I":[],"C":[],"O":[],"rejected":[]}\n'
-        'Each value must be an array of strings. Do not include any other keys.'         
+        "ROLE: You curate MeSH-like terms into P/I/C/O bins for a systematic review.\n"
+        "INPUTS: A base PICO term set and a flat list of MeSH terms collected from key PMIDs.\n"
+        "TASK:\n"
+        "  1) Normalize, deduplicate, and assign each candidate term to exactly one bin among P, I, C, O.\n"
+        "  2) If a term is irrelevant/too generic, put it in 'rejected'.\n"
+        "  3) Preserve case and spelling; do not invent novel terms.\n"
+        "  4) Return at most 20 terms per P/I/C/O and at most 50 in 'rejected'.\n"
+        "OUTPUT:\n"
+        "  Return STRICT JSON (no markdown, no commentary) with EXACTLY these keys:\n"
+        "'  {\"P\":[],\"I\":[],\"C\":[],\"O\":[],\"rejected\":[]}\n"
+        "  Each value is an array of strings.\n"
+        "CONSTRAINTS: No extra keys. No trailing comments. JSON must parse."
     )
     user_payload = {
         "narrative_question": proto.narrative_question,
-        "P_terms": proto.P_terms, "I_terms": proto.I_terms,
-        "C_terms": proto.C_terms, "O_terms": proto.O_terms,
+        "protocol_year_range": [proto.year_min, proto.year_max],
+        "designs_allowlist": proto.designs_allowlist,
+        "pubtype_blocklist": proto.pubtype_blocklist,
+        "base_terms": {"P": proto.P_terms, "I": proto.I_terms, "C": proto.C_terms, "O": proto.O_terms},
         "mesh_terms": mesh_terms
     }
     user_prompt = json.dumps(user_payload, ensure_ascii=False)
 
-    txt = llm_chat(proto.llm["chat_endpoint"], proto.llm["chat_model"], sys_prompt, user_prompt)
-    try:
-        curated = json.loads(txt)
-    except Exception:
-        # robust parse: extract first JSON object
-        m = re.search(r"\{.*\}", txt, re.S)
-        curated = json.loads(m.group(0)) if m else {"P":[],"I":[],"C":[],"O":[],"rejected":[]}
+    txt = llm_chat(
+        proto.llm["chat_endpoint"], proto.llm["chat_model"],
+        sys_prompt, user_prompt,
+        timeout_s=60,               # leave as-is
+        max_retries=4,
+        log_path=os.path.join(OUTDIR, "screening.log"),
+        stream=True,                # <— prevents mid-gen cutoff
+        idle_timeout_s=10,          # <— bails only if no bytes for 45s (stalled)
+        continuation_retry=1        # <— finish JSON once if cut mid-stream
+    )
 
-    out = {
-        "P": curated.get("P", [])[:20],
-        "I": curated.get("I", [])[:20],
-        "C": curated.get("C", [])[:20],
-        "O": curated.get("O", [])[:20],
-        "rejected": curated.get("rejected", [])[:50]
-    }
+    # robust parse + sanitize
+    curated = {"P": [], "I": [], "C": [], "O": [], "rejected": []}
+    try:
+        parsed = json.loads(txt)
+    except Exception:
+        m = re.search(r"\{.*\}", txt, re.S)
+        parsed = json.loads(m.group(0)) if m else curated
+
+    for k in ["P","I","C","O","rejected"]:
+        vals = parsed.get(k, [])
+        if not isinstance(vals, list):
+            vals = []
+        # de-dup while preserving order
+        seen = set(); kept = []
+        for v in vals:
+            s = str(v).strip()
+            if not s or s in seen: continue
+            seen.add(s); kept.append(s)
+        curated[k] = kept[:20] if k in ["P","I","C","O"] else kept[:50]
+
     path = os.path.join(OUTDIR, "mesh_curated.json" if stage==1 else "mesh_curated_stage2.json")
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=2)
-    return out
+        json.dump(curated, f, ensure_ascii=False, indent=2)
+    return curated
 
 # ----------------------------
 # CELL 8 — Ranking (TF-IDF + Embeddings + MeSH-Jaccard) → RRF with recency tie
@@ -769,7 +982,29 @@ def screen_tiab(proto: Protocol, curated: Dict[str,List[str]], records_csv: str,
     min_rate = float(proto.screening["yield_min_rate"])
     consec = int(proto.screening["yield_consecutive"])
 
-    sys_prompt = "You classify RCT/observational articles for inclusion in a systematic review. Return strict JSON (see schema). Keep reasons ≤200 chars."
+    sys_prompt = (
+        "ROLE: You screen titles/abstracts for a systematic review.\n"
+        "DECISION SPACE: label ∈ {include, exclude, maybe}.\n"
+        "CRITERIA:\n"
+        "  • Apply the protocol details in the provided JSON payload (year range, allowed designs, blocked pubtypes, PICO terms).\n"
+        "  • INCLUDE if the abstract clearly matches PICO and allowed study designs.\n"
+        "  • EXCLUDE if it clearly violates population/intervention/comparator/outcome/design/pubtype/year.\n"
+        "  • MAYBE only if insufficient information is present in TIAB to decide.\n"
+        "OUTPUT JSON (STRICT, single object, no extra text):\n"
+        "  {\n"
+        "    \"label\": \"include|exclude|maybe\",\n"
+        "    \"conf\": <float 0..1>,\n"
+        "    \"reason\": \"<=180 chars (concise justification)\",\n"
+        "    \"P\": <bool>, \"I\": <bool>, \"C\": <bool>, \"O\": <bool>,\n"
+        "    \"design_ok\": <bool>, \"pubtype_ok\": <bool>, \"year_ok\": <bool>,\n"
+        "    \"mesh_hits\": [], \"salient_terms\": [],\n"
+        "    \"pris_ref\": \"screen\",\n"
+        "    \"excl_code\": \"PT|POP|INT|OUT|DUP|OTHER\"  // one or pipe-joined; use PT for wrong pubtype/design\n"
+        "  }\n"
+        "CONSTRAINTS:\n"
+        "  • JSON must parse. No markdown. No commentary outside JSON.\n"
+        "  • If excluding, set an appropriate excl_code (PT/POP/INT/OUT/DUP/OTHER).\n"
+    )
     schema_example = {
         "label": "include|exclude|maybe",
         "conf": 0.0,
@@ -833,8 +1068,13 @@ def screen_tiab(proto: Protocol, curated: Dict[str,List[str]], records_csv: str,
                 obj = json.loads(txt)
             except Exception:
                 m = re.search(r"\{.*\}", txt, re.S)
-                obj = json.loads(m.group(0)) if m else {"label":"exclude","conf":0.0,"reason":"parse_error","pris_ref":pris_ref,"excl_code":"OTHER"}
-            obj["pris_ref"] = pris_ref  # enforce
+                obj = json.loads(m.group(0)) if m else {"label":"exclude","conf":0.0,"reason":"parse_error"}
+
+            # enforce schema & backfill excl_code if missing
+            if "excl_code" not in obj or not obj["excl_code"]:
+                obj["excl_code"] = _heuristic_excl_code(obj.get("reason",""))
+
+            obj = _ensure_schema(obj, pris_ref=pris_ref, allow_maybe=True)
             jf.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
             # Log a single-line audit record
@@ -919,7 +1159,7 @@ def merge_and_handoff():
                 "DOI": r.get("doi") or ""
             })
     write_csv(os.path.join(OUTDIR, "final_fulltext_handoff.csv"),
-              handoff_rows, ["PMID","Year","FirstAuthor","Title","DOI"])
+          handoff_rows, ["PMID","Year","FirstAuthor","Title","DOI"])
 
 # ----------------------------
 # CELL 12 — Full-text fetcher integration (provided script as-is) + extraction + final LLM
@@ -964,87 +1204,24 @@ def _load_curated_for_fulltext() -> Dict[str,List[str]]:
             return json.load(f)
     return {"P":[],"I":[],"C":[],"O":[]}
 
-def fulltext_screen(proto: Protocol):
-    import pandas as pd
+def _split_text_for_llm(txt: str, max_chars: int = 3000, overlap: int = 250) -> List[str]:
+    txt = (txt or "").strip()
+    if len(txt) <= max_chars:
+        return [txt]
+    chunks = []
+    i = 0
+    n = len(txt)
+    while i < n:
+        j = min(i + max_chars, n)
+        # try to end at sentence boundary
+        k = txt.rfind(".", i+int(0.6*max_chars), j)
+        if k == -1: k = j
+        chunks.append(txt[i:k].strip())
+        i = max(k - overlap, i + max_chars - overlap)
+    return [c for c in chunks if c]
 
-    # PDFs location
-    pdf_dir = os.path.join(OUTDIR, "pdfs")
-    os.makedirs(pdf_dir, exist_ok=True)
-
-    # run fetcher (as-is) against our CSV (Sci-Hub gated by env in _run_fetcher_with_csv)
-    handoff = os.path.join(OUTDIR, "final_fulltext_handoff.csv")
-    try:
-        # Preferred signature (library-only fetcher)
-        attempt_oa_downloads(
-            handoff_csv_path=handoff,
-            output_dir=pdf_dir,
-            min_pdf_bytes=1000,           # keep 1KB guard (intended behavior)
-            ncbi_api_key=NCBI_API_KEY,
-            contact_email=NCBI_EMAIL
-        )
-    except TypeError:
-        # Fallback for older signature
-        attempt_oa_downloads(handoff, pdf_dir, ncbi_api_key=NCBI_API_KEY)
-
-    # collect PDFs and map by PMID from handoff
-    df = pd.read_csv(handoff)
-    # Normalize column names that we care about
-    for col in ["PMID","Year","FirstAuthor","Title","DOI"]:
-        if col not in df.columns:
-            df[col] = ""
-    df["PMID"] = pd.to_numeric(df["PMID"], errors="coerce").astype("Int64")
-    meta = {}
-    for _, r in df.iterrows():
-        pmid = int(r["PMID"]) if pd.notna(r["PMID"]) else None
-        if pmid:
-            meta[pmid] = {
-                "Title": str(r["Title"] or ""),
-                "Year": str(r["Year"] or ""),
-                "FirstAuthor": str(r["FirstAuthor"] or ""),
-                "DOI": str(r["DOI"] or ""),
-            }
-            
-    # after you build final_full_text_handoff.csv (27 PMIDs in your run),
-    # add a fetch log collecting per-PMID status
-
-    handoff_csv = os.path.join(OUTDIR, "final_full_text_handoff.csv")
-    _fetch_log = []
-    if os.path.exists(handoff_csv):
-        import csv as _csv
-        with open(handoff_csv, newline='', encoding='utf-8') as _f:
-            rows = list(_csv.DictReader(_f))
-        pmids = [int(r["pmid"]) for r in rows if str(r.get("pmid","")).isdigit()]
-
-        # Replace the following block with your actual fetcher calls,
-        # but ALWAYS append a status row per PMID.
-        for p in pmids:
-            status = {
-                "pmid": p,
-                "found_pmcid": False,
-                "found_doi": False,
-                "oa_source": "",
-                "pdf_saved": False,
-                "error": ""
-            }
-            try:
-                # (A) try NCBI linkout → PMCID
-                # status["found_pmcid"] = ...
-                # (B) try DOI → Unpaywall (needs email)
-                # status["found_doi"] = ...
-                # status["oa_source"] = "pmc"|"unpaywall"|"publisher"|"scihub_disabled"
-                # status["pdf_saved"] = True/False
-                pass
-            except Exception as e:
-                status["error"] = f"{e.__class__.__name__}: {e}"
-            _fetch_log.append(status)
-
-        write_csv(os.path.join(OUTDIR, "fulltext_fetch_results.csv"),
-                list(_fetch_log[0].keys()) if _fetch_log else ["pmid","status"], _fetch_log)
-
-    # Final screen
-    curated = _load_curated_for_fulltext()
-    sys_prompt = "You classify full-text RCT/observational articles for inclusion in a systematic review. Return strict JSON (see schema). No 'maybe'."
-    schema_example = {
+def _ft_schema() -> dict:
+    return {
         "label": "include|exclude",
         "conf": 0.0,
         "reason": "",
@@ -1056,84 +1233,435 @@ def fulltext_screen(proto: Protocol):
         "extraction": "pdfminer|ocr"
     }
 
-    screened_rows=[]
+def _fulltext_chunk_vote(proto: Protocol, record_meta: dict, chunk_text: str, sys_prompt: str, mesh_curated: Optional[dict]=None) -> dict:
+    schema = _ft_schema()
+    user_payload = {
+        "protocol": {
+            "year_min": proto.year_min, "year_max": proto.year_max,
+            "designs_allowlist": proto.designs_allowlist, "pubtype_blocklist": proto.pubtype_blocklist
+        },
+        "mesh_curated": (mesh_curated or {"P":[],"I":[],"C":[],"O":[]}),
+        "record": record_meta,
+        "fulltext_chunk": chunk_text[:3000],  # hard cap
+        "schema": schema
+    }
+    txt = llm_chat(
+        proto.llm["chat_endpoint"], proto.llm["chat_model"],
+        sys_prompt, json.dumps(user_payload, ensure_ascii=False),
+        timeout_s=60, max_retries=4, log_path=os.path.join(OUTDIR, "fulltext.log")
+    )
+    try:
+        obj = json.loads(txt)
+    except Exception:
+        m = re.search(r"\{.*\}", txt, re.S)
+        obj = json.loads(m.group(0)) if m else {"label":"exclude","conf":0.0,"reason":"parse_error","excl_code":"OTHER"}
+    if "excl_code" not in obj or not obj["excl_code"]:
+        obj["excl_code"] = _heuristic_excl_code(obj.get("reason",""))
+    return _ensure_schema(obj, pris_ref="fulltext", allow_maybe=False)
+
+def fulltext_screen(proto: Protocol):
+    import pandas as pd, glob
+
+    pdf_dir = os.path.join(OUTDIR, "pdfs")
+    os.makedirs(pdf_dir, exist_ok=True)
+
+    # unified handoff filename
+    handoff = os.path.join(OUTDIR, "final_fulltext_handoff.csv")
+    # ensure we call the fetcher exactly once (kept as you had)
+    try:
+        attempt_oa_downloads(
+            handoff_csv_path=handoff,
+            output_dir=pdf_dir,
+            min_pdf_bytes=1000,
+            ncbi_api_key=NCBI_API_KEY,
+            contact_email=NCBI_EMAIL
+        )
+    except TypeError:
+        attempt_oa_downloads(handoff, pdf_dir, ncbi_api_key=NCBI_API_KEY)
+
+    # load meta
+    df = pd.read_csv(handoff) if os.path.exists(handoff) else pd.DataFrame(columns=["PMID","Year","FirstAuthor","Title","DOI"])
+    df["PMID"] = pd.to_numeric(df.get("PMID"), errors="coerce").astype("Int64")
+    meta = {
+        int(r.PMID): {
+            "pmid": int(r.PMID),
+            "title": str(r.Title or ""),
+            "year": int(r.Year) if str(r.Year).isdigit() else None,
+            "first_author": str(r.FirstAuthor or ""),
+            "doi": str(r.DOI or "")
+        }
+        for _, r in df.iterrows() if pd.notna(r.PMID)
+    }
+
+    curated = _load_curated_for_fulltext()
+    sys_prompt = (
+        "ROLE: You judge ONE full-text chunk for SR eligibility.\n"
+        "DECISION SPACE: label ∈ {include, exclude}. No 'maybe' at full text.\n"
+        "INPUT JSON includes protocol constraints (years, designs, pubtype blocklist), curated P/I/C/O terms, record metadata, and a single chunk of full text.\n"
+        "CRITERIA:\n"
+        "  • INCLUDE only if the chunk provides enough evidence that the full article matches PICO and allowed designs (or clearly indicates trial/observational with correct outcomes).\n"
+        "  • EXCLUDE if the chunk unambiguously shows a violation (wrong population/intervention/comparator/outcome/design/pubtype/year), or if it shows it's a non-eligible pubtype (review/protocol/case, etc.).\n"
+        "  • If the chunk is insufficient and prior chunks are unknown, be conservative; prefer EXCLUDE unless inclusion is well supported.\n"
+        "OUTPUT JSON (STRICT, single object):\n"
+        "  {\n"
+        "    \"label\": \"include|exclude\",\n"
+        "    \"conf\": <float 0..1>,\n"
+        "    \"reason\": \"<=160 chars (concise)\",\n"
+        "    \"P\": <bool>, \"I\": <bool>, \"C\": <bool>, \"O\": <bool>,\n"
+        "    \"design_ok\": <bool>, \"pubtype_ok\": <bool>, \"year_ok\": <bool>,\n"
+        "    \"mesh_hits\": [], \"salient_terms\": [],\n"
+        "    \"pris_ref\": \"fulltext\",\n"
+        "    \"excl_code\": \"PT|POP|INT|OUT|DUP|OTHER\"\n"
+        "  }\n"
+        "CONSTRAINTS: JSON only, no extra text; set excl_code when excluding (PT for non-eligible pubtype/design).\n"
+    )
+
     flog = os.path.join(OUTDIR, "fulltext.log")
     _append_lines(flog, [f"# {datetime.now(timezone.utc).isoformat()}Z fulltext run start"])
 
-    for fname in os.listdir(pdf_dir):
-        if not fname.lower().endswith(".pdf"):
+    results_jsonl = os.path.join(OUTDIR, "fulltext_llm_screen.jsonl")
+    out_rows = []
+
+    # extract texts
+    pdf_paths = sorted(glob.glob(os.path.join(pdf_dir, "*.pdf")))
+    for pdf_path in pdf_paths:
+        # try to locate pmid in filename first; else fallback: parse from handoff mapping against Title substring
+        fname = os.path.basename(pdf_path)
+        pmid = None
+        m = re.search(r"(\d{7,9})", fname)
+        if m: pmid = int(m.group(1))
+        if pmid is None:
+            # weak fallback: skip if no pmid found
             continue
-        m = re.match(r"(\d{4})_(.+?)_(\d+)\.pdf", fname)
-        if not m:
-            # skip files that don't follow naming convention
-            continue
-        pmid = int(m.group(3))
-        pdf_path = os.path.join(pdf_dir, fname)
+
         text, method = extract_text_pdf(pdf_path)
+        record_meta = meta.get(pmid, {"pmid": pmid, "title": "", "year": None, "first_author": "", "doi": ""})
 
-        rmeta = meta.get(pmid, {"Title":"", "Year":"", "FirstAuthor":"", "DOI":""})
-        # build user prompt
-        user_payload = {
-            "protocol": asdict(proto),
-            "mesh_curated": curated,
-            "record": {
-                "pmid": pmid,
-                "title": rmeta["Title"],
-                "year": int(rmeta["Year"]) if str(rmeta["Year"]).isdigit() else None,
-                "first_author": rmeta["FirstAuthor"],
-                "doi": rmeta["DOI"]
-            },
-            "fulltext_excerpt": text[:120000],  # truncate if huge
-            "schema": schema_example
-        }
-        txt = llm_chat(proto.llm["chat_endpoint"], proto.llm["chat_model"], sys_prompt, json.dumps(user_payload, ensure_ascii=False))
-        try:
-            obj = json.loads(txt)
-        except Exception:
-            m2 = re.search(r"\{.*\}", txt, re.S)
-            obj = json.loads(m2.group(0)) if m2 else {"label":"exclude","conf":0.0,"reason":"parse_error","pris_ref":"fulltext","excl_code":"OTHER"}
-        obj["pris_ref"]="fulltext"; obj["extraction"]=method
+        chunks = _split_text_for_llm(text, max_chars=3000, overlap=250)
+        votes = []
+        include_hits = 0
+        exclude_hits = 0
 
-        # Append to log
-        try:
-            cval = float(obj.get("conf", 0.0))
-        except Exception:
-            cval = 0.0
-        _append_lines(flog, [f"pmid={pmid}\tlabel={obj.get('label')}\tconf={cval:.2f}\tmethod={method}"])
+        for idx, ch in enumerate(chunks):
+            v = _fulltext_chunk_vote(proto, record_meta, ch, sys_prompt, curated)
+            # early stop rules (single-article, chunk-wise)
+            if v["label"] == "exclude" and v["conf"] >= 0.80 and v["excl_code"] != "OTHER":
+                votes.append(v); exclude_hits += 1
+                _append_lines(flog, [f"pmid={pmid}\tchunk={idx}\tearly=exclude\tconf={v['conf']:.2f}\tcode={v['excl_code']}"])
+                break
+            votes.append(v)
+            if v["label"] == "include" and v["conf"] >= 0.85:
+                include_hits += 1
+                if include_hits >= 2:  # require confirmation in another chunk
+                    _append_lines(flog, [f"pmid={pmid}\tchunk={idx}\tearly=include\tconf={v['conf']:.2f}"])
+                    break
+            # hard cap on chunks to avoid stressing small LLMs
+            if idx >= 6:  # analyze ≤7 chunks/article
+                break
 
-        screened_rows.append({
+        # aggregate chunk votes
+        inc = sum(1 for v in votes if v["label"] == "include")
+        exc = sum(1 for v in votes if v["label"] == "exclude")
+        if inc > 0 and exc == 0:
+            final = max((v for v in votes if v["label"]=="include"), key=lambda x: x["conf"])
+        elif exc > 0 and inc == 0:
+            final = max((v for v in votes if v["label"]=="exclude"), key=lambda x: x["conf"])
+        else:
+            # tie-breaker: prefer exclude unless include has higher conf by ≥0.10
+            best_inc = max((v for v in votes if v["label"]=="include"), default=None, key=lambda x: x["conf"])
+            best_exc = max((v for v in votes if v["label"]=="exclude"), default=None, key=lambda x: x["conf"])
+            if best_inc and (not best_exc or best_inc["conf"] >= (best_exc["conf"] + 0.10)):
+                final = best_inc
+            else:
+                final = best_exc or {"label":"exclude","conf":0.0,"reason":"inconclusive","excl_code":"OTHER"}
+
+        # ensure schema & attach extraction method
+        final = _ensure_schema(final, pris_ref="fulltext", allow_maybe=False)
+        if not final.get("excl_code"):
+            final["excl_code"] = _heuristic_excl_code(final.get("reason",""))
+        final["extraction"] = method
+
+        # write JSONL (detailed)
+        with open(results_jsonl, "a", encoding="utf-8") as jf:
+            jf.write(json.dumps({"pmid": pmid, **final}, ensure_ascii=False) + "\n")
+
+        # write tabular summary
+        out_rows.append({
             "pmid": pmid,
-            "label": obj.get("label"),
-            "conf": obj.get("conf"),
-            "reason": obj.get("reason"),
+            "label": final["label"],
+            "conf": final["conf"],
+            "reason": final["reason"],
+            "excl_code": final["excl_code"],
             "extraction": method
         })
 
-    write_csv(os.path.join(OUTDIR, "fulltext_screened.csv"), screened_rows,
-              ["pmid","label","conf","reason","extraction"])
+        _append_lines(flog, [f"pmid={pmid}\tfinal={final['label']}\tconf={final['conf']:.2f}\tcode={final['excl_code']}\tmethod={method}"])
 
-    # manual_fulltext_todo.csv from failed list (if provided by fetcher)
-    failed_txt = os.path.join(OUTDIR, "fulltext_failed_pmids.txt")
-    # The provided fetcher writes to its working dir; move if exists
-    if os.path.exists(os.path.join("fulltext_failed_pmids.txt")):
-        shutil.move("fulltext_failed_pmids.txt", failed_txt)
-    if os.path.exists(failed_txt):
-        todo=[]
-        with open(failed_txt, "r", encoding="utf-8") as f:
+    write_csv(os.path.join(OUTDIR, "fulltext_screened.csv"), out_rows,
+              ["pmid","label","conf","reason","excl_code","extraction"])
+    
+def _collect_reasons(jsonl_paths: List[str]) -> List[str]:
+    reasons = []
+    for p in jsonl_paths:
+        if not os.path.exists(p): continue
+        with open(p, "r", encoding="utf-8") as f:
             for line in f:
-                pmid_str = line.strip()
-                if not pmid_str.isdigit():
+                try:
+                    obj = json.loads(line)
+                    if str(obj.get("label","")).lower()=="exclude":
+                        reasons.append(str(obj.get("reason","")).strip())
+                except Exception:
                     continue
-                pmid = int(pmid_str)
-                r = meta.get(pmid, {"DOI":"", "Title":"", "Year":""})
-                todo.append({
-                    "PMID": pmid,
-                    "DOI": r.get("DOI",""),
-                    "Title": r.get("Title",""),
-                    "Year": r.get("Year","")
-                })
-        write_csv(os.path.join(OUTDIR, "manual_fulltext_todo.csv"), todo,
-                  ["PMID","DOI","Title","Year"])
+    # dedup while preserving order
+    seen=set(); out=[]
+    for r in reasons:
+        if r and r not in seen:
+            seen.add(r); out.append(r)
+    return out
+
+def _llm_derive_bins(proto: Protocol, reasons_sample: List[str], max_chars: int=6000) -> Dict[str,str]:
+    """
+    Phase 1: ask LLM to propose dataset-specific bins and map them to EXCL_CODES.
+    Returns a dict like {"Wrong population":"POP", "Unwanted design":"PT", ...}
+    """
+    sys_prompt = (
+        "ROLE: You derive dataset-specific exclusion reason bins and map them to canonical codes.\n"
+        "INPUT: A sample list of short exclusion reasons from an SR triage.\n"
+        "TASK:\n"
+        "  1) Propose a small set (5–15) of dataset-specific category names that cover these reasons.\n"
+        "  2) Map each category to ONE canonical code: PT (pubtype/design), POP (population), INT (intervention), OUT (outcome), DUP (duplicate), OTHER.\n"
+        "OUTPUT JSON (STRICT): {\"bins\":[{\"name\":\"...\",\"code\":\"PT|POP|INT|OUT|DUP|OTHER\"}, ...]}\n"
+        "CONSTRAINTS: JSON only; names concise; codes from the allowed set only."
+    )
+    buf = []
+    used = 0
+    for r in reasons_sample:
+        s = f"- {r}\n"
+        if used + len(s) > max_chars: break
+        buf.append(s); used += len(s)
+    user = "Sample exclusion reasons:\n" + "".join(buf)
+
+    try:
+        txt = llm_chat(proto.llm["chat_endpoint"], proto.llm["chat_model"], sys_prompt, user,
+                       timeout_s=45, max_retries=3, log_path=os.path.join(OUTDIR,"screening.log"))
+        m = re.search(r"\{.*\}", txt, re.S)
+        if not m:
+            return {}
+        j = json.loads(m.group(0))
+        mapping = {}
+        for b in j.get("bins", []):
+            name = (b.get("name") or "").strip()
+            code = (b.get("code") or "").strip().upper()
+            if name and code in EXCL_CODES:
+                mapping[name] = code
+        return mapping
+    except Exception:
+        return {}
+
+def _classify_reason_with_bins(reason: str, name2code: Dict[str,str]) -> str:
+    for name, code in name2code.items():
+        if name and name.lower() in (reason or "").lower():
+            return code
+    return _heuristic_excl_code(reason)
+
+def _load_screen_jsonl(path: str) -> List[dict]:
+    out=[]
+    if not os.path.exists(path): return out
+    with open(path,"r",encoding="utf-8") as f:
+        for ln in f:
+            try:
+                out.append(json.loads(ln))
+            except Exception:
+                pass
+    return out
+
+def _parse_query_log_counts(path: str) -> Tuple[List[str], List[int]]:
+    qs, cs = [], []
+    if not os.path.exists(path): return qs, cs
+    with open(path,"r",encoding="utf-8") as f:
+        for ln in f:
+            if "\t" in ln and "::" in ln and "count=" in ln:
+                # lines like: " refined_count=123 :: (query...)"
+                m = re.search(r"(?:base_count|refined_count|rescue_count|count)=(\d+)\s+::\s+(.*)$", ln.strip())
+                if m:
+                    cs.append(int(m.group(1))); qs.append(m.group(2))
+    return qs, cs
+
+def prisma_aggregate_and_report(proto: Protocol):
+    import pandas as pd, glob
+    report = {}
+
+    # Queries and counts
+    qlog = os.path.join(OUTDIR, "query_manager.log")
+    queries, counts = _parse_query_log_counts(qlog)
+    report["queries"] = [{"query": q, "count": c} for q,c in zip(queries, counts)]
+    report["queries_total"] = sum(counts)
+
+    # Universe + prefilter
+    pre_sum = os.path.join(OUTDIR, "prefilter_summary.csv")
+    pre_det = os.path.join(OUTDIR, "prefilter_detail.csv")
+    if os.path.exists(pre_sum):
+        report["prefilter_summary"] = pd.read_csv(pre_sum).to_dict(orient="records")[0]
+    if os.path.exists(pre_det):
+        dfpd = pd.read_csv(pre_det)
+        report["prefilter_kept"] = int(dfpd["kept"].sum())
+
+    # Stage-1/2 TIAB screens
+    s1 = os.path.join(OUTDIR, "s1_llm_screen.jsonl")
+    s2 = os.path.join(OUTDIR, "s2_llm_screen.jsonl")
+    s1o = _load_screen_jsonl(s1)
+    s2o = _load_screen_jsonl(s2)
+    def _count_screen(objs):
+        inc = sum(1 for o in objs if str(o.get("label","")).lower() in ("include","maybe"))
+        exc = sum(1 for o in objs if str(o.get("label","")).lower() == "exclude")
+        return inc, exc, len(objs)
+    s1_inc, s1_exc, s1_n = _count_screen(s1o)
+    s2_inc, s2_exc, s2_n = _count_screen(s2o)
+    report["stage1_screen"] = {"n": s1_n, "include_maybe": s1_inc, "exclude": s1_exc}
+    report["stage2_screen"] = {"n": s2_n, "include_maybe": s2_inc, "exclude": s2_exc}
+
+    # Citation-reference snowballing (CILE)
+    st2_sum = os.path.join(OUTDIR, "stage2_prefilter_summary.json")
+    if os.path.exists(st2_sum):
+        with open(st2_sum,"r",encoding="utf-8") as f:
+            js = json.load(f)
+        report["snowballing_identified_raw"] = js.get("n_raw", 0)
+        report["snowballing_pass_prefilter"] = js.get("n_pass", 0)
+
+    # Full text fetch & screen
+    pdf_count = len(glob.glob(os.path.join(OUTDIR,"pdfs","*.pdf")))
+    report["fulltext_pdfs_fetched"] = pdf_count
+    ft_csv = os.path.join(OUTDIR, "fulltext_screened.csv")
+    if os.path.exists(ft_csv):
+        dfft = pd.read_csv(ft_csv)
+        report["fulltext_screen_included"] = int((dfft["label"].str.lower()=="include").sum())
+        # reason bins
+        reasons_all = _collect_reasons([os.path.join(OUTDIR,"fulltext_llm_screen.jsonl")])
+        # build bins in ≤6k context
+        sample = reasons_all[:200]  # usually fits ≤6k with short lines
+        bins_map = _llm_derive_bins(proto, sample, max_chars=6000)
+        dfft["bin_code"] = dfft.apply(
+            lambda r: (r.get("excl_code") if str(r.get("label","")).lower()=="exclude"
+                       else ""), axis=1)
+        # fill missing or OTHER by refined mapping
+        def _fix(code, reason):
+            code = str(code or "").strip().upper()
+            if not code or code=="OTHER":
+                return _classify_reason_with_bins(reason, bins_map)
+            return code
+        dfft["bin_code"] = dfft.apply(lambda r: _fix(r["bin_code"], r.get("reason","")), axis=1)
+        rep = dfft[dfft["label"].str.lower()=="exclude"]["bin_code"].value_counts().to_dict()
+        report["fulltext_excluded_by_reason"] = rep
+
+    # PRISMA core tallies
+    report["identification_total"] = report.get("queries_total", 0)
+    report["screened_tiab"] = (report.get("stage1_screen",{}).get("n",0)
+                               + report.get("stage2_screen",{}).get("n",0))
+    report["included_fulltext"] = report.get("fulltext_screen_included", 0)
+
+    # write artifacts
+    with open(os.path.join(OUTDIR,"prisma_report.json"),"w",encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+
+    # simple markdown summary for humans
+    md = []
+    md.append("# PRISMA Aggregation\n")
+    md.append("## Identification\n")
+    md.append(f"- Database queries: {len(report.get('queries',[]))} (total hits sum={report.get('queries_total',0)})\n")
+    md.append("## Screening\n")
+    md.append(f"- Stage-1 TIAB: n={s1_n}, include/maybe={s1_inc}, exclude={s1_exc}\n")
+    md.append(f"- Stage-2 TIAB (snowballing): n={s2_n}, include/maybe={s2_inc}, exclude={s2_exc}\n")
+    md.append("## Eligibility (full text)\n")
+    md.append(f"- PDFs fetched: {pdf_count}\n")
+    md.append(f"- Included after full-text: {report.get('fulltext_screen_included',0)}\n")
+    if report.get("fulltext_excluded_by_reason"):
+        md.append("### Excluded by reason (full-text)\n")
+        for k,v in report["fulltext_excluded_by_reason"].items():
+            md.append(f"- {k}: {v}\n")
+    md.append("## Snowballing (Citation-Reference)\n")
+    if "snowballing_identified_raw" in report:
+        md.append(f"- Identified via CILE: {report['snowballing_identified_raw']} (prefilter pass={report.get('snowballing_pass_prefilter',0)})\n")
+    with open(os.path.join(OUTDIR,"prisma_report.md"),"w",encoding="utf-8") as f:
+        f.write("\n".join(md))
+
+def glm_similarity_vs_inclusion():
+    """
+    Fits GLMs (logit) for Stage-1 and Stage-2 TIAB:
+      outcome = 1 if included/maybe, 0 if exclude
+      predictors = z(score_tfidf), z(score_emb), z(score_mesh), z(rrf)
+    Writes triage_stats.json with coefficients & (if available) p-values.
+    """
+    import pandas as pd, numpy as np
+    try:
+        import statsmodels.api as sm
+        have_sm = True
+    except Exception:
+        have_sm = False
+        from sklearn.linear_model import LogisticRegression
+
+    stats = {}
+
+    def _one(stage_csv: str, screen_jsonl: str, key="stage1"):
+        p_csv = os.path.join(OUTDIR, stage_csv)
+        p_jsn = os.path.join(OUTDIR, screen_jsonl)
+        if not (os.path.exists(p_csv) and os.path.exists(p_jsn)):
+            return
+        X = pd.read_csv(p_csv)
+        # build labels
+        y_map = {}
+        with open(p_jsn,"r",encoding="utf-8") as f:
+            for ln in f:
+                try:
+                    o = json.loads(ln)
+                    pmid = int(o.get("pmid", o.get("record",{}).get("pmid", -1)))
+                    lab = str(o.get("label","")).lower()
+                    y_map[pmid] = 1 if lab in ("include","maybe") else 0
+                except:
+                    pass
+        X["y"] = X["pmid"].map(y_map)
+        X = X.dropna(subset=["y"])
+        if X.empty: return
+
+        # numeric features
+        for c in ["score_tfidf","score_emb","score_mesh","rrf"]:
+            X[c] = pd.to_numeric(X[c], errors="coerce")
+        X = X.dropna(subset=["score_tfidf","score_emb","score_mesh","rrf"])
+        if X.empty: return
+        # z-scale
+        for c in ["score_tfidf","score_emb","score_mesh","rrf"]:
+            m, s = X[c].mean(), X[c].std() or 1.0
+            X[c+"_z"] = (X[c]-m)/s
+
+        feats = ["score_tfidf_z","score_emb_z","score_mesh_z","rrf_z"]
+
+        if have_sm:
+            Xmat = sm.add_constant(X[feats])
+            model = sm.GLM(X["y"], Xmat, family=sm.families.Binomial())
+            res = model.fit()
+            stats[key] = {
+                "n": int(X.shape[0]),
+                "coef": {k: float(res.params.get(k, float("nan"))) for k in ["const"]+feats},
+                "pval": {k: float(res.pvalues.get(k, float("nan"))) for k in ["const"]+feats},
+                "library": "statsmodels"
+            }
+        else:
+            # fallback: sklearn logistic regression (no p-values)
+            lr = LogisticRegression(max_iter=1000, solver="lbfgs")
+            lr.fit(X[feats], X["y"])
+            coefs = dict(zip(feats, [float(x) for x in lr.coef_[0]]))
+            stats[key] = {
+                "n": int(X.shape[0]),
+                "coef": {"const": float(lr.intercept_[0]), **coefs},
+                "pval": {k: None for k in ["const"]+feats},
+                "library": "sklearn_logistic"
+            }
+
+    _one("triage_stage1_candidates.csv","s1_llm_screen.jsonl","stage1")
+    _one("triage_stage2_candidates.csv","s2_llm_screen.jsonl","stage2")
+
+    with open(os.path.join(OUTDIR,"triage_stats.json"),"w",encoding="utf-8") as f:
+        json.dump(stats, f, indent=2)
+
 
 # ----------------------------
 # ORCHESTRATOR
@@ -1328,7 +1856,12 @@ def run_pipeline(protocol_path: str):
     root_log.info("[FullText] Fetch → extract → final LLM…")
     fulltext_screen(proto)
 
+    # 11) PRISMA aggregation + stats
+    prisma_aggregate_and_report(proto)
+    glm_similarity_vs_inclusion()
+
     root_log.info("[DONE] All artifacts under triage_out/")
+    
 
 # ----------------------------
 # CLI

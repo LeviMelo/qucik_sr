@@ -1,0 +1,34 @@
+# 2025-09-14T05:53:56.278801+00:00Z fulltext run start
+pmid=31330457	final=exclude	conf=0.20	code=PT	method=pdfminer
+pmid=31122843	chunk=3	early=exclude	conf=0.95	code=PT
+pmid=31122843	final=exclude	conf=0.95	code=PT	method=pdfminer
+pmid=32417925	chunk=5	early=include	conf=0.95
+pmid=32417925	final=include	conf=0.95	code=PT|POP|INT|OUT|DUP|OTHER	method=pdfminer
+pmid=32660716	chunk=3	early=exclude	conf=0.95	code=PT|POP|INT|OUT|OTHER
+pmid=32660716	final=exclude	conf=0.95	code=PT|POP|INT|OUT|OTHER	method=pdfminer
+pmid=31955478	chunk=2	early=include	conf=0.95
+pmid=31955478	final=include	conf=0.95	code=PT|POP|INT|OUT|DUP|OTHER	method=pdfminer
+pmid=32696226	chunk=2	early=exclude	conf=0.90	code=PT
+pmid=32696226	final=exclude	conf=0.90	code=PT	method=pdfminer
+pmid=32179393	chunk=1	early=include	conf=0.95
+pmid=32179393	final=include	conf=0.95	code=PT|POP	method=pdfminer
+pmid=32092617	final=include	conf=0.95	code=POP	method=pdfminer
+pmid=33358107	chunk=2	early=exclude	conf=0.95	code=PT|POP|INT|OUT|DUP|OTHER
+pmid=33358107	final=exclude	conf=0.95	code=PT|POP|INT|OUT|DUP|OTHER	method=pdfminer
+pmid=34893026	chunk=1	early=include	conf=0.85
+pmid=34893026	final=include	conf=0.95	code=PT|POP|INT|OUT|DUP|OTHER	method=pdfminer
+pmid=33099765	chunk=2	early=exclude	conf=0.85	code=PT|POP|INT|OUT|DUP|OTHER
+pmid=33099765	final=include	conf=0.95	code=POP	method=pdfminer
+pmid=34988957	chunk=2	early=exclude	conf=0.85	code=PT
+pmid=34988957	final=exclude	conf=0.85	code=PT	method=pdfminer
+pmid=35249833	chunk=2	early=include	conf=0.95
+pmid=35249833	final=include	conf=0.95	code=POP	method=pdfminer
+pmid=38548664	chunk=2	early=include	conf=0.95
+pmid=38548664	final=include	conf=0.95	code=PT|POP|INT|OUT|DUP|OTHER	method=pdfminer
+pmid=39473759	chunk=1	early=include	conf=0.95
+pmid=39473759	final=include	conf=0.95	code=PT|POP|INT|OUT|DUP|OTHER	method=pdfminer
+pmid=40883665	chunk=2	early=exclude	conf=0.95	code=PT
+pmid=40883665	final=exclude	conf=0.95	code=PT	method=pdfminer
+pmid=40628866	chunk=6	early=include	conf=0.85
+pmid=40628866	final=include	conf=0.95	code=PT|POP	method=pdfminer
+pmid=40211141	final=include	conf=0.95	code=PT|POP|INT|OUT|DUP|OTHER	method=pdfminer

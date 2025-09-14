@@ -1,0 +1,98 @@
+# 2025-09-14T05:13:16.649365+00:00Z triage_stage1_candidates.csv -> s1_llm_screen.jsonl
+screen	pmid=33099765	label=maybe	conf=0.20	reason=Abstract describes a retrospective study comparing ESPB and
+screen	pmid=33483269	label=exclude	conf=0.95	reason=The abstract describes a study on serratus anterior plane bl
+screen	pmid=38878034	label=exclude	conf=0.00	reason=The abstract describes a study on continuous erector spinae
+screen	pmid=36109206	label=exclude	conf=0.90	reason=The abstract describes a study comparing ESP and PVB in VATS
+screen	pmid=31955478	label=maybe	conf=0.20	reason=Abstract describes a study comparing SAPB and TPVB in VATS t
+screen	pmid=37233969	label=include	conf=0.95	reason=The abstract clearly addresses the PICO elements: Population
+screen	pmid=37408302	label=exclude	conf=0.00	reason=The abstract describes a study on combined TPVB and ESPB for
+screen	pmid=35766959	label=include	conf=0.95	reason=The abstract clearly addresses the PICO elements: Population
+screen	pmid=36088297	label=exclude	conf=0.00	reason=The abstract describes a study comparing ESPB and TPVB+ICNB
+screen	pmid=32417925	label=include	conf=0.95	reason=The abstract clearly addresses the PICO elements: It compare
+screen	pmid=35249833	label=include	conf=0.95	reason=The abstract clearly addresses the PICO elements: It compare
+screen	pmid=37094177	label=exclude	conf=0.95	reason=The abstract describes a study on paravertebral block combin
+screen	pmid=35799555	label=exclude	conf=0.95	reason=The abstract describes a study on mitral valve surgery, whic
+screen	pmid=34554693	label=exclude	conf=0.00	reason=The abstract describes a study on chronic pain after thoraco
+screen	pmid=38019172	label=exclude	conf=0.95	reason=The abstract describes a study on rescue analgesia with serr
+screen	pmid=39283707	label=exclude	conf=0.00	reason=The abstract describes a randomized controlled trial compari
+screen	pmid=33358107	label=maybe	conf=0.20	reason=Abstract describes a study comparing ESPB, TPVB and ICNB aft
+screen	pmid=32660716	label=include	conf=0.95	reason=The abstract clearly addresses the PICO elements: population
+screen	pmid=38548664	label=maybe	conf=0.30	reason=Abstract describes a study on SAPB and PVB in VATS, but the
+screen	pmid=40743548	label=maybe	conf=0.20	reason=Abstract describes a comparison of thoracic epidural analges
+screen	pmid=38489966	label=exclude	conf=0.00	reason=The abstract describes a study comparing ESPB and ICNB after
+screen	pmid=31330457	label=include	conf=0.95	reason=The abstract clearly describes a study comparing ESPB, SAPB,
+screen	pmid=36544613	label=exclude	conf=0.95	reason=The abstract describes a cohort study comparing paravertebra
+screen	pmid=40883665	label=include	conf=0.95	reason=The abstract clearly describes a study comparing different p
+screen	pmid=38041029	label=exclude	conf=0.95	reason=The abstract describes a randomized controlled trial compari
+screen	pmid=39674735	label=maybe	conf=0.20	reason=Abstract describes a study comparing SAPB and TPVB in childr
+screen	pmid=39473759	label=maybe	conf=0.20	reason=Abstract describes a comparison of C-SAPB and TPVB for posto
+screen	pmid=37747499	label=exclude	conf=0.00	reason=The abstract describes a study comparing continuous paravert
+screen	pmid=39310947	label=exclude	conf=0.00	reason=The abstract describes a randomized controlled trial compari
+screen	pmid=32092617	label=include	conf=0.95	reason=The abstract clearly addresses the PICO elements: Population
+screen	pmid=34636753	label=exclude	conf=0.00	reason=The abstract describes a study on dexmedetomidine added to r
+screen	pmid=40211141	label=include	conf=0.95	reason=The abstract clearly addresses the protocol's PICO elements:
+screen	pmid=36254906	label=exclude	conf=0.00	reason=The abstract describes a study on erector spinae plane block
+screen	pmid=36747119	label=exclude	conf=0.95	reason=The abstract describes a study on analgesic efficacy of loca
+screen	pmid=33019807	label=exclude	conf=0.95	reason=The abstract describes a study comparing ultrasound-guided p
+screen	pmid=36517403	label=include	conf=0.95	reason=The abstract clearly addresses the protocol's narrative ques
+screen	pmid=39858993	label=exclude	conf=0.95	reason=The abstract describes a single-center, prospective, and ran
+screen	pmid=35220180	label=exclude	conf=0.95	reason=The abstract describes a study on breast cancer surgery, not
+screen	pmid=33285665	label=exclude	conf=0.95	reason=The abstract describes a study comparing SAPB and ICNB for p
+screen	pmid=35274774	label=exclude	conf=0.00	reason=The abstract describes a study on chronic postsurgical pain
+screen	pmid=40537064	label=exclude	conf=0.00	reason=The abstract describes a study comparing intercostal nerve b
+screen	pmid=36150741	label=exclude	conf=0.90	reason=The abstract describes a study on ultrasound-guided single-i
+screen	pmid=36773983	label=exclude	conf=0.95	reason=The abstract describes a study comparing erector spinae plan
+screen	pmid=36131308	label=maybe	conf=0.20	reason=Abstract describes a RCT comparing intermittent bolus vs con
+screen	pmid=40749388	label=include	conf=0.95	reason=The abstract clearly addresses the PICO elements: population
+screen	pmid=34893026	label=include	conf=0.95	reason=The abstract clearly addresses the PICO elements: population
+screen	pmid=34347237	label=exclude	conf=0.95	reason=The abstract describes a study on the effects of continuous
+screen	pmid=38336669	label=exclude	conf=0.00	reason=The abstract describes a retrospective cohort study comparin
+screen	pmid=32179393	label=include	conf=0.95	reason=The abstract clearly addresses the PICO elements: Population
+screen	pmid=39773335	label=exclude	conf=0.95	reason=The abstract describes a study on paracetamol after VATS wit
+screen	pmid=31122843	label=include	conf=0.95	reason=The abstract clearly addresses the PICO elements: population
+screen	pmid=38882043	label=exclude	conf=0.90	reason=The abstract describes a study on dexmedetomidine adjuvants
+screen	pmid=39079795	label=exclude	conf=0.95	reason=The abstract describes a study on catheter-based erector spi
+screen	pmid=40781595	label=include	conf=0.95	reason=The abstract clearly describes a study comparing different p
+screen	pmid=34988957	label=include	conf=0.95	reason=The abstract clearly addresses the PICO elements: population
+screen	pmid=37207551	label=exclude	conf=0.00	reason=The abstract describes a comparison between costotransverse
+screen	pmid=39029153	label=exclude	conf=0.95	reason=The abstract describes a study on pectoralis and serratus an
+screen	pmid=36074392	label=maybe	conf=0.20	reason=Abstract describes a randomized clinical trial comparing ESP
+screen	pmid=38654164	label=exclude	conf=0.95	reason=The abstract describes a study on erector spinae plane block
+screen	pmid=37573993	label=exclude	conf=0.00	reason=The abstract describes a study on paravertebral anesthesia f
+screen	pmid=40315237	label=maybe	conf=0.20	reason=Abstract describes a study comparing different adjuvants for
+screen	pmid=40822381	label=maybe	conf=0.20	reason=Abstract describes a study on thoracic paravertebral block w
+screen	pmid=39939956	label=exclude	conf=0.90	reason=The abstract describes a randomized controlled trial of nerv
+screen	pmid=32842912	label=exclude	conf=0.00	reason=The abstract discusses breast surgery and thoracic paraverte
+screen	pmid=37568076	label=exclude	conf=0.90	reason=The abstract describes a study comparing two levels of ESPB
+screen	pmid=34819261	label=exclude	conf=0.90	reason=The abstract describes a pilot trial in robotic-assisted tho
+screen	pmid=38829406	label=exclude	conf=0.95	reason=The abstract describes a study on ultrasound-guided erector
+screen	pmid=36911242	label=exclude	conf=0.95	reason=The abstract describes a study comparing ultrasound-guided r
+screen	pmid=34263623	label=exclude	conf=0.00	reason=The abstract describes a study on ketamine infusion with par
+screen	pmid=37129976	label=exclude	conf=0.90	reason=The abstract describes a study on robotically-assisted coron
+screen	pmid=38388893	label=exclude	conf=0.95	reason=The abstract describes a study on thoracolumbar paravertebra
+screen	pmid=37665743	label=exclude	conf=0.95	reason=The abstract describes a study on intercostal nerve block (I
+screen	pmid=39166501	label=exclude	conf=0.00	reason=The abstract describes a study on opioid-free anesthesia com
+screen	pmid=36807995	label=exclude	conf=0.90	reason=The abstract describes a study on minimally invasive mitral
+screen	pmid=40628866	label=maybe	conf=0.30	reason=Abstract describes a study on postoperative analgesia in eld
+screen	pmid=38212049	label=maybe	conf=0.30	reason=Abstract describes a non-inferiority trial comparing ESP blo
+screen	pmid=34607760	label=exclude	conf=0.00	reason=The abstract describes a study on serratus anterior plane bl
+screen	pmid=39925991	label=exclude	conf=0.95	reason=The abstract describes a study on waveform characteristics i
+screen	pmid=36592009	label=exclude	conf=0.00	reason=The abstract describes a study comparing intermittent bolus
+screen	pmid=32561247	label=exclude	conf=0.00	reason=The abstract describes a study on mitral valve surgery, not
+screen	pmid=33628809	label=exclude	conf=0.95	reason=The abstract describes a study on ultrasound-guided thoracic
+screen	pmid=33383266	label=exclude	conf=0.95	reason=The abstract describes a study on serratus anterior plane bl
+screen	pmid=33403428	label=exclude	conf=0.00	reason=The abstract describes a study on thoracic paravertebral blo
+screen	pmid=34784889	label=exclude	conf=0.95	reason=The abstract describes a study on ultrasound-guided paravert
+screen	pmid=34521135	label=exclude	conf=0.95	reason=The abstract discusses postoperative delirium in geriatric p
+screen	pmid=40348971	label=exclude	conf=0.95	reason=The abstract describes a study on the impact of hydromorphon
+screen	pmid=39835949	label=exclude	conf=0.90	reason=The abstract describes a study comparing ESPB and RIB in bre
+screen	pmid=32696226	label=maybe	conf=0.20	reason=Abstract describes a pilot study evaluating ESP block in tho
+screen	pmid=32398580	label=exclude	conf=0.00	reason=The abstract describes a study on ultrasound-guided paravert
+screen	pmid=40119455	label=exclude	conf=0.00	reason=The abstract describes a study on paravertebral block analge
+screen	pmid=40082780	label=exclude	conf=0.95	reason=The abstract describes a study on rib fractures and nerve bl
+screen	pmid=40837277	label=exclude	conf=0.95	reason=The abstract describes a study on esketamine combined with p
+screen	pmid=36255525	label=exclude	conf=0.90	reason=The abstract describes a study on continuous paravertebral b
+screen	pmid=39903015	label=include	conf=0.95	reason=The abstract clearly addresses the PICO elements: thoracic s
+screen	pmid=32106812	label=exclude	conf=0.00	reason=The abstract discusses postoperative pain treatment in patie
+# 2025-09-14T05:26:19.498388+00:00Z triage_stage2_candidates.csv -> s2_llm_screen.jsonl
+screen	pmid=40784764	label=maybe	conf=0.20	reason=Abstract describes a systematic review and meta-analysis pro

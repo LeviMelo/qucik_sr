@@ -1,0 +1,48 @@
+{
+  "P": [
+    "Thoracic Surgical Procedures",
+    "thoracic surgery",
+    "VATS",
+    "video-assisted thoracoscopic surgery",
+    "thoracotomy",
+    "thoracoscopy",
+    "lung resection",
+    "lobectomy",
+    "segmentectomy",
+    "wedge resection",
+    "pleurectomy",
+    "decortication"
+  ],
+  "I": [
+    "erector spinae plane block",
+    "ESPB",
+    "erector spinae block",
+    "serratus anterior plane block",
+    "SAPB",
+    "paravertebral block",
+    "thoracic paravertebral block",
+    "TPVB",
+    "PVB"
+  ],
+  "C": [
+    "opioid consumption",
+    "morphine consumption",
+    "morphine milligram equivalents",
+    "pain score",
+    "numeric rating scale",
+    "visual analogue scale",
+    "postoperative nausea and vomiting",
+    "PONV",
+    "chronic postsurgical pain",
+    "chronic pain",
+    "rescue analgesia",
+    "time to first analgesic",
+    "length of stay",
+    "respiratory complications",
+    "pulmonary complications",
+    "adverse events",
+    "pneumothorax"
+  ],
+  "O": [],
+  "rejected": []
+}

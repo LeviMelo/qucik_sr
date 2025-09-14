@@ -1,0 +1,93 @@
+{
+  "narrative_question": "In adults undergoing elective abdominal surgery, does propofol-based total intravenous anesthesia (TIVA) versus volatile inhalational anesthesia (e.g., sevoflurane/isoflurane/desflurane) differentially affect postoperative gut microbiome composition and systemic inflammation, and do these differences associate with gastrointestinal recovery and complications?",
+  "year_min": 2015,
+  "year_max": 2025,
+  "designs_allowlist": [
+    "Randomized Controlled Trial",
+    "Controlled Clinical Trial",
+    "Clinical Trial",
+    "Clinical Study",
+    "Comparative Study",
+    "Cohort Studies",
+    "Case-Control Studies",
+    "Prospective Studies"
+  ],
+  "pubtype_blocklist": [
+    "Case Reports",
+    "Review",
+    "Systematic Review",
+    "Meta-Analysis",
+    "Editorial",
+    "Letter",
+    "Comment"
+  ],
+  "mandatory_blocks": ["C", "O"],
+  "P_terms": [
+    "adult*",
+    "elective abdominal surgery",
+    "colorectal surgery",
+    "gastrectomy",
+    "hepatectomy",
+    "pancreatectomy",
+    "laparoscopic surgery",
+    "open surgery",
+    "ERAS"
+  ],
+  "I_terms": [
+    "propofol",
+    "total intravenous anesthesia",
+    "TIVA",
+    "intravenous anesthesia",
+    "propofol-based anesthesia"
+  ],
+  "C_terms": [
+    "sevoflurane",
+    "isoflurane",
+    "desflurane",
+    "inhalational anesthesia",
+    "volatile anesthesia"
+  ],
+  "O_terms": [
+    "gut microbiome",
+    "intestinal microbiota",
+    "16S rRNA sequencing",
+    "metagenomic sequencing",
+    "alpha diversity",
+    "Shannon index",
+    "beta diversity",
+    "interleukin-6",
+    "IL-6",
+    "C-reactive protein",
+    "CRP",
+    "TNF-alpha",
+    "lipopolysaccharide",
+    "LPS",
+    "zonulin",
+    "postoperative ileus",
+    "surgical site infection",
+    "length of stay"
+  ],
+  "key_pmids": [
+    7576870,
+    34409198,
+    29092838,
+    31980418
+  ],
+  "query_targets": {
+    "TARGET_MIN": 50,
+    "TARGET_MAX": 3000,
+    "UNIVERSE_FETCH_MAX": 10000
+  },
+  "screening": {
+    "llm_screen_cap_threshold": 1000,
+    "yield_window": 50,
+    "yield_min_rate": 0.12,
+    "yield_consecutive": 2
+  },
+  "llm": {
+    "embed_endpoint": "http://localhost:1234/v1/embeddings",
+    "embed_model": "text-embedding-qwen3-embedding-0.6b@f16",
+    "chat_endpoint": "http://localhost:1234/v1/chat/completions",
+    "chat_model": "gemma-3n-e2b-it@q6_k"
+  }
+}

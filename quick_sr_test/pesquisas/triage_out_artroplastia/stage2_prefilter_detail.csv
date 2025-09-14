@@ -1,0 +1,43 @@
+pmid,year,pubtypes,ok,year_ok,pubtype_ok,design_ok
+32024676,2020,Journal Article;Randomized Controlled Trial,True,True,True,True
+27685346,2016,"Journal Article;Research Support, Non-U.S. Gov't",False,False,True,False
+21655901,2011,Journal Article;Review,False,False,False,False
+28288050,2017,Journal Article;Network Meta-Analysis,False,False,True,False
+40523471,2025,Journal Article;Scoping Review,False,True,True,False
+36790543,2023,Meta-Analysis;Systematic Review;Journal Article,False,True,False,False
+35852550,2022,Journal Article;Review,False,True,False,False
+26938989,2016,"Comparative Study;Journal Article;Randomized Controlled Trial;Research Support, Non-U.S. Gov't",False,False,True,True
+32694032,2021,Equivalence Trial;Journal Article;Randomized Controlled Trial,True,True,True,True
+19585696,2009,Journal Article;Multicenter Study,False,False,True,True
+27007076,2016,"Comparative Study;Journal Article;Randomized Controlled Trial;Research Support, Non-U.S. Gov't",False,False,True,True
+37968690,2023,Journal Article;Review,False,True,False,False
+39222327,2024,Journal Article,False,True,True,False
+25099748,2014,"Journal Article;Randomized Controlled Trial;Research Support, Non-U.S. Gov't",False,False,True,True
+34433647,2021,Journal Article;Meta-Analysis;Systematic Review,False,True,False,False
+31826920,2019,Journal Article,False,False,True,False
+28002228,2017,Journal Article,False,False,True,False
+31056239,2019,Comparative Study;Journal Article;Multicenter Study;Randomized Controlled Trial,False,False,True,True
+29975272,2018,Comparative Study;Journal Article;Randomized Controlled Trial,False,False,True,True
+28606458,2017,Comparative Study;Journal Article;Meta-Analysis;Systematic Review,False,False,False,True
+29053504,2017,Journal Article;Review,False,False,False,False
+15635516,2004,Journal Article;Review,False,False,False,False
+39019501,2024,Journal Article,False,True,True,False
+27035459,2016,Journal Article;Multicenter Study;Review,False,False,False,True
+37552001,2023,Review;Journal Article,False,True,False,False
+34535548,2021,Journal Article;Randomized Controlled Trial,True,True,True,True
+27106963,2016,Comparative Study;Journal Article;Meta-Analysis;Systematic Review,False,False,False,True
+33926778,2021,"Journal Article;Meta-Analysis;Research Support, Non-U.S. Gov't;Systematic Review",False,True,False,False
+30988126,2019,"Journal Article;Research Support, Non-U.S. Gov't",False,False,True,False
+30562208,2018,Journal Article;Review,False,False,False,False
+22588748,2011,Journal Article;Review,False,False,False,False
+27428259,2016,Journal Article;Meta-Analysis;Systematic Review,False,False,False,False
+29721648,2018,Clinical Trial;Comparative Study;Journal Article,False,False,True,True
+36708747,2023,"Journal Article;Research Support, Non-U.S. Gov't;Network Meta-Analysis",False,True,True,False
+28089187,2017,Journal Article;Randomized Controlled Trial,False,False,True,True
+28602535,2017,Journal Article,False,False,True,False
+33678402,2021,Journal Article;Systematic Review,False,True,False,False
+25111605,2014,Journal Article;Review,False,False,False,False
+34232932,2021,Journal Article;Review,False,True,False,False
+27015545,2016,Journal Article,False,False,True,False
+26639986,2016,Comparative Study;Journal Article;Randomized Controlled Trial,False,False,True,True
+32705319,2020,"Journal Article;Randomized Controlled Trial;Research Support, Non-U.S. Gov't",True,True,True,True

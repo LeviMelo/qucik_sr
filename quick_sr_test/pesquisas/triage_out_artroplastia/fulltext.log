@@ -1,0 +1,15 @@
+# 2025-09-14T06:40:59.405485+00:00Z fulltext run start
+pmid=32694032	chunk=3	early=include	conf=0.95
+pmid=32694032	final=include	conf=0.95	code=PT|POP|INT|OUT|DUP|OTHER	method=pdfminer
+pmid=35440521	chunk=2	early=include	conf=0.95
+pmid=35440521	final=include	conf=0.95	code=PT|POP|INT|OUT|DUP|OTHER	method=pdfminer
+pmid=35157136	chunk=1	early=include	conf=0.95
+pmid=35157136	final=include	conf=0.95	code=PT|POP|INT|OUT|DUP|OTHER	method=pdfminer
+pmid=35590308	chunk=1	early=include	conf=0.95
+pmid=35590308	final=include	conf=0.95	code=PT|POP|INT|OUT|DUP|OTHER	method=pdfminer
+pmid=32980982	chunk=0	early=exclude	conf=0.95	code=PT
+pmid=32980982	final=exclude	conf=0.95	code=PT	method=pdfminer
+pmid=37898482	chunk=3	early=exclude	conf=0.95	code=PT
+pmid=37898482	final=exclude	conf=0.95	code=PT	method=pdfminer
+pmid=39847230	chunk=5	early=exclude	conf=0.95	code=PT|POP|INT|OUT|DUP|OTHER
+pmid=39847230	final=exclude	conf=0.95	code=PT|POP|INT|OUT|DUP|OTHER	method=pdfminer

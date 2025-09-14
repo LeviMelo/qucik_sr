@@ -1,9 +1,0 @@
-{
-  "n_raw": 16,
-  "n_pass": 1,
-  "fail_breakdown": {
-    "year": 7,
-    "pubtype": 10,
-    "design": 13
-  }
-}

@@ -1,0 +1,102 @@
+{
+  "narrative_question": "In adults undergoing primary total knee arthroplasty, do motor-sparing regional techniques (adductor canal block with or without IPACK) compared with traditional approaches (e.g., femoral nerve block ± sciatic or periarticular infiltration) improve early functional recovery (earlier/wider ambulation), preserve quadriceps strength, and maintain equivalent or better analgesia (pain scores, opioid consumption), with shorter length of stay?",
+  "year_min": 2020,
+  "year_max": 2025,
+  "designs_allowlist": [
+    "Randomized Controlled Trial",
+    "Controlled Clinical Trial",
+    "Clinical Trial",
+    "Comparative Study",
+    "Cohort Studies",
+    "Multicenter Study",
+    "Pragmatic Clinical Trial"
+  ],
+  "pubtype_blocklist": [
+    "Case Reports",
+    "Review",
+    "Systematic Review",
+    "Meta-Analysis",
+    "Letter",
+    "Editorial",
+    "Comment",
+    "Guideline",
+    "Practice Guideline",
+    "Consensus Development Conference",
+    "Study Protocol",
+    "Clinical Trial Protocol"
+  ],
+  "mandatory_blocks": ["C","O"],
+  "P_terms": [
+    "Arthroplasty, Replacement, Knee",
+    "total knee arthroplasty",
+    "knee replacement",
+    "primary TKA",
+    "unilateral TKA",
+    "elective knee arthroplasty",
+    "adult"
+  ],
+  "I_terms": [
+    "adductor canal block",
+    "ACB",
+    "adductor canal",
+    "saphenous nerve block",
+    "IPACK",
+    "infiltration between the popliteal artery and capsule of the knee",
+    "motor-sparing block",
+    "single-shot ACB",
+    "continuous adductor canal catheter",
+    "local anesthetics",
+    "bupivacaine",
+    "ropivacaine",
+    "dexamethasone adjuvant"
+  ],
+  "C_terms": [
+    "femoral nerve block",
+    "FNB",
+    "sciatic nerve block",
+    "combined femoral-sciatic block",
+    "periarticular infiltration",
+    "adductor canal block alone"
+  ],
+  "O_terms": [
+    "time to ambulation",
+    "distance walked",
+    "quadriceps strength",
+    "maximum voluntary isometric contraction",
+    "MVIC",
+    "pain score",
+    "visual analogue scale",
+    "numeric rating scale",
+    "opioid consumption",
+    "morphine milligram equivalents",
+    "rescue analgesia",
+    "time to first analgesic",
+    "postoperative nausea and vomiting",
+    "PONV",
+    "falls",
+    "length of stay",
+    "LOS",
+    "patient satisfaction"
+  ],
+  "key_pmids": [
+    24728739,
+    32694032
+  ],
+  "query_targets": {
+    "TARGET_MIN": 100,
+    "TARGET_MAX": 2000,
+    "UNIVERSE_FETCH_MAX": 5000
+  },
+  "screening": {
+    "llm_screen_cap_threshold": 800,
+    "yield_window": 40,
+    "yield_min_rate": 0.12,
+    "yield_consecutive": 2
+  },
+  "llm": {
+    "embed_endpoint": "http://localhost:1234/v1/embeddings",
+    "embed_model": "text-embedding-qwen3-embedding-0.6b@f16",
+    "chat_endpoint": "http://localhost:1234/v1/chat/completions",
+    "chat_model": "gemma-3n-e2b-it@q6_k"
+  }
+}

@@ -1,0 +1,47 @@
+# 2025-09-14T06:30:22.806775+00:00Z triage_stage1_candidates.csv -> s1_llm_screen.jsonl
+screen	pmid=35590308	label=maybe	conf=0.20	reason=Abstract describes a study comparing adductor canal block wi
+screen	pmid=35157136	label=include	conf=0.95	reason=The abstract clearly addresses the PICO elements: primary ou
+screen	pmid=37391523	label=exclude	conf=0.95	reason=The abstract describes a study comparing femoral nerve block
+screen	pmid=31240665	label=exclude	conf=0.95	reason=The abstract describes a comparative study of different pain
+screen	pmid=39645191	label=exclude	conf=0.95	reason=The abstract describes a retrospective study from 2020-2023,
+screen	pmid=32980982	label=maybe	conf=0.20	reason=Abstract describes a randomized controlled trial comparing d
+screen	pmid=39847230	label=include	conf=0.95	reason=The abstract clearly addresses the PICO elements: primary ou
+screen	pmid=35440521	label=include	conf=0.95	reason=The abstract clearly addresses the PICO elements: primary ou
+screen	pmid=36734449	label=exclude	conf=0.95	reason=The abstract describes a randomized controlled trial compari
+screen	pmid=35112178	label=exclude	conf=0.95	reason=The abstract describes a study comparing different anesthesi
+screen	pmid=39390370	label=exclude	conf=0.20	reason=The abstract describes a retrospective multi-center cohort s
+screen	pmid=32200610	label=exclude	conf=0.00	reason=The abstract is a study comparing two methods of continuous
+screen	pmid=34536763	label=exclude	conf=0.10	reason=The abstract describes a study on ultrasound-guided selectiv
+screen	pmid=35773028	label=exclude	conf=0.95	reason=The abstract describes a randomized controlled trial compari
+screen	pmid=38506437	label=exclude	conf=0.20	reason=The abstract describes a comparison of analgesic effects of
+screen	pmid=35199973	label=exclude	conf=0.00	reason=The abstract is a journal article describing a study on bupr
+screen	pmid=35189397	label=exclude	conf=0.00	reason=The abstract describes a study comparing femoral nerve block
+screen	pmid=34098686	label=exclude	conf=0.95	reason=The abstract is a journal article with a randomized controll
+screen	pmid=37898482	label=maybe	conf=0.20	reason=Abstract describes a non-inferiority trial comparing intraop
+screen	pmid=38647134	label=exclude	conf=0.00	reason=The abstract discusses a study on rebound pain after nerve b
+screen	pmid=40308075	label=maybe	conf=0.20	reason=Abstract describes a study on postoperative pain and opioid
+screen	pmid=36856693	label=exclude	conf=0.95	reason=The abstract describes a study on periarticular local infilt
+screen	pmid=36709881	label=exclude	conf=0.00	reason=The abstract describes a study on dexmedetomidine as an adju
+screen	pmid=38340677	label=exclude	conf=0.00	reason=The abstract describes a study on liposomal bupivacaine via
+screen	pmid=36793155	label=exclude	conf=0.10	reason=The abstract describes a study on morphine administration af
+screen	pmid=32361928	label=exclude	conf=0.95	reason=The abstract describes a study on periarticular infiltration
+screen	pmid=37060089	label=exclude	conf=0.10	reason=The abstract describes a study on magnesium sulfate for peri
+screen	pmid=40542872	label=exclude	conf=0.00	reason=The abstract describes a study comparing SFIPB to periarticu
+screen	pmid=38401617	label=exclude	conf=0.95	reason=The abstract describes a randomized controlled trial compari
+screen	pmid=33032804	label=exclude	conf=0.90	reason=The abstract discusses analgesia in ACL reconstruction, not
+screen	pmid=31980156	label=exclude	conf=0.95	reason=The abstract describes a study on ACLR, not primary TKA. The
+screen	pmid=32201109	label=exclude	conf=0.95	reason=The abstract discusses a study on buprenorphine transdermal
+screen	pmid=38645991	label=exclude	conf=0.10	reason=The abstract describes a study on dexmedetomidine and dexame
+screen	pmid=39956454	label=exclude	conf=0.95	reason=The abstract describes a study on ACL reconstruction with ha
+screen	pmid=33603939	label=exclude	conf=0.00	reason=The abstract describes a study on femoral nerve blocks and n
+screen	pmid=39558412	label=exclude	conf=0.00	reason=The abstract describes a study on unicompartmental knee arth
+screen	pmid=32764898	label=exclude	conf=0.95	reason=The abstract discusses femoral neck fractures and compares F
+screen	pmid=39102486	label=exclude	conf=0.00	reason=The abstract is about hallux valgus surgery, not primary tot
+screen	pmid=39715108	label=exclude	conf=0.00	reason=The abstract discusses chronic venous disease of the lower e
+screen	pmid=38102032	label=exclude	conf=0.00	reason=The abstract describes a study on dogs undergoing TPLO surge
+screen	pmid=38735542	label=exclude	conf=0.00	reason=The abstract is about total hip arthroplasty (THA), not tota
+# 2025-09-14T06:36:19.517482+00:00Z triage_stage2_candidates.csv -> s2_llm_screen.jsonl
+screen	pmid=32024676	label=exclude	conf=0.95	reason=The abstract describes a randomized controlled trial compari
+screen	pmid=32694032	label=maybe	conf=0.20	reason=Abstract describes a noninferiority trial comparing adductor
+screen	pmid=32705319	label=exclude	conf=0.95	reason=The abstract discusses the effects of morphine on peri-artic
+screen	pmid=34535548	label=exclude	conf=0.00	reason=The abstract is about shoulder surgery, not knee arthroplast

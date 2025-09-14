@@ -1,0 +1,113 @@
+{
+  "narrative_question": "In pediatric patients (0–18 years) undergoing video-assisted thoracoscopic surgery (VATS), how do non-intubated anesthesia with spontaneous ventilation (NIVATS) versus intubated general anesthesia (IVATS) compare for peri- and postoperative outcomes (recovery milestones, complications, oxygenation, conversions)?",
+  "year_min": 2015,
+  "year_max": 2025,
+  "designs_allowlist": [
+    "Randomized Controlled Trial",
+    "Controlled Clinical Trial",
+    "Clinical Trial",
+    "Clinical Study",
+    "Comparative Study",
+    "Cohort Studies",
+    "Case-Control Studies",
+    "Prospective Studies",
+    "Multicenter Study"
+  ],
+  "pubtype_blocklist": [
+    "Case Reports",
+    "Review",
+    "Systematic Review",
+    "Meta-Analysis",
+    "Editorial",
+    "Letter",
+    "Comment",
+    "Practice Guideline",
+    "Consensus Development Conference"
+  ],
+  "mandatory_blocks": ["C", "O"],
+  "P_terms": [
+    "pediatric",
+    "child",
+    "children",
+    "infant",
+    "neonate",
+    "adolescent",
+    "0-18 years",
+    "thoracic surgery",
+    "video-assisted thoracoscopic surgery",
+    "VATS",
+    "thoracoscopy",
+    "pediatric VATS",
+    "lung biopsy",
+    "lobectomy",
+    "pulmonary surgery"
+  ],
+  "I_terms": [
+    "non-intubated anesthesia",
+    "NIVATS",
+    "tubeless VATS",
+    "spontaneous ventilation anesthesia",
+    "spontaneous breathing anesthesia",
+    "laryngeal mask airway",
+    "LMA",
+    "sedation anesthesia",
+    "regional anesthesia plus sedation"
+  ],
+  "C_terms": [
+    "intubated VATS",
+    "IVATS",
+    "general anesthesia with intubation",
+    "one-lung ventilation",
+    "OLV",
+    "double-lumen tube",
+    "single-lumen endotracheal tube",
+    "endotracheal intubation",
+    "mechanical ventilation"
+  ],
+  "O_terms": [
+    "length of stay",
+    "LOS",
+    "time to first oral intake",
+    "time to oral feeding",
+    "postoperative complications",
+    "airway complications",
+    "hypoxemia",
+    "oxygen desaturation",
+    "SpO2",
+    "minimum oxygen saturation",
+    "conversion to intubation",
+    "conversion rate",
+    "postoperative nausea and vomiting",
+    "PONV",
+    "sore throat",
+    "pain score",
+    "opioid consumption",
+    "PACU time",
+    "ICU admission",
+    "anesthesia duration",
+    "operative time",
+    "inflammatory markers",
+    "IL-6",
+    "CRP",
+    "cortisol",
+    "hemodynamic stability"
+  ],
+  "key_pmids": [],
+  "query_targets": {
+    "TARGET_MIN": 40,
+    "TARGET_MAX": 2000,
+    "UNIVERSE_FETCH_MAX": 8000
+  },
+  "screening": {
+    "llm_screen_cap_threshold": 1000,
+    "yield_window": 50,
+    "yield_min_rate": 0.12,
+    "yield_consecutive": 2
+  },
+  "llm": {
+    "embed_endpoint": "http://localhost:1234/v1/embeddings",
+    "embed_model": "text-embedding-qwen3-embedding-0.6b@f16",
+    "chat_endpoint": "http://localhost:1234/v1/chat/completions",
+    "chat_model": "gemma-3n-e2b-it@q6_k"
+  }
+}
