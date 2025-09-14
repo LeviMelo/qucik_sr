@@ -1,0 +1,21 @@
+# 2025-09-14T01:10:01.723726+00:00Z triage_stage1_candidates.csv -> s1_llm_screen.jsonl
+screen	pmid=33099765	label=include	conf=0.90	reason=Retrospective study comparing ESPB and SAPB for postoperativ
+screen	pmid=37233969	label=include	conf=0.90	reason=RCT comparing ESPB+SAPB vs TPVB for analgesia, safety (opioi
+screen	pmid=32417925	label=include	conf=0.95	reason=RCT compares ESPB and SAPB for pain management after VATS su
+screen	pmid=33483269	label=include	conf=0.95	reason=RCT comparing ESPB and SAPB for perioperative pain control i
+screen	pmid=35766959	label=include	conf=0.95	reason=Study compares ESPB, SAPB, and TPVB for acute pain after VAT
+screen	pmid=38878034	label=include	conf=0.95	reason=Study compares ESPB and TPVB for postoperative analgesia in
+screen	pmid=36088297	label=exclude	conf=0.95	reason=Study compares ESPB to TPVB+ICNB, not SAPB. Focus is on VATS
+screen	pmid=36109206	label=include	conf=0.95	reason=RCT compares ESPB and SAPB/TPVB for analgesic efficacy & saf
+screen	pmid=37408302	label=include	conf=0.90	reason=Article compares ESPB, SAPB, and TPVB for analgesic efficacy
+screen	pmid=35249833	label=include	conf=0.95	reason=RCT comparing ESPB and C-SAPB in VATS patients.  Focuses on
+screen	pmid=33358107	label=include	conf=0.95	reason=RCT compares ESPB, SAPB, and TPVB for pain control & safety
+screen	pmid=32660716	label=include	conf=0.95	reason=RCT compares ESP and SAPB for postoperative pain & recovery
+screen	pmid=35799555	label=include	conf=0.10	reason=Observational study comparing ESPB and SAPB for postoperativ
+screen	pmid=40211141	label=include	conf=0.95	reason=RCT compares ESPB, SAPB, and TPVB for acute pain, opioid con
+screen	pmid=31330457	label=include	conf=0.95	reason=Study compares ESPB, SAPB, and TPVB in thoracoscopic surgery
+screen	pmid=38041029	label=include	conf=0.95	reason=RCT comparing ESPB and SAPB for postoperative analgesia in u
+screen	pmid=32092617	label=include	conf=0.95	reason=RCT comparing ESPB and PVB for opioid consumption, pain scor
+screen	pmid=39939956	label=exclude	conf=0.90	reason=Article focuses on uVATS, not general thoracic surgery.  The
+# 2025-09-14T01:12:15.126227+00:00Z triage_stage2_candidates.csv -> s2_llm_screen.jsonl
+screen	pmid=31122843	label=include	conf=0.95	reason=RCT compares ESPB to SAPB and TPVB for analgesic efficacy &

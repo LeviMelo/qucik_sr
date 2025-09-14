@@ -1218,7 +1218,7 @@ def run_pipeline(protocol_path: str):
         per_node_cap=500,
         # broaden/disable topic-agnostic gates to avoid tiny A:
         min_relevance_frac=0.00,
-        per_node_ext_frac_cap=None,
+        per_node_ext_frac_cap=0.85,
         H_external_budget=None,           # or a larger number if you want a cap
         max_accept_after_filter=1200,     # since you seed with up to 1200 now
         deterministic_reservoir=True,
@@ -1280,7 +1280,8 @@ def run_pipeline(protocol_path: str):
     # write CSV (header inferred)
     if detail_rows:
         write_csv(os.path.join(OUTDIR, "stage2_prefilter_detail.csv"),
-                list(detail_rows[0].keys()), detail_rows)
+                detail_rows,
+                list(detail_rows[0].keys()))
 
     # tiny JSON summary
     from collections import Counter

@@ -47,8 +47,8 @@ class OuterConfig:
     max_accept_after_filter: Optional[int] = 300  # final cap after all filters
 
     # Relevance & hub constraints
-    min_relevance_frac: float = 0.05  # gate by relative score vs. seed median
-    per_node_ext_frac_cap: float = 0.85  # reject candidates with too many external neighbors
+    min_relevance_frac: Optional[float] = 0.05     # (optional) allow None to disable gate  # gate by relative score vs. seed median
+    per_node_ext_frac_cap: Optional[float] = 0.85  # None → disable cap  # reject candidates with too many external neighbors
     quarantine_hubs: bool = True
     quarantine_mode: str = "external"  # "external" or "total"
 
@@ -532,27 +532,34 @@ def build_next_H_adaptive(
                 cand.add(v)
     cand_list = sorted(cand, key=lambda i: stable_hash_u32(H.pmids[i]))
 
-    # Relevance scores are not recomputed here; we use degree as a simple proxy to avoid math changes.
-    # Gate by fraction of max degree in A (local relevance proxy).
+    # Local relevance reference (median degree within A)
     degA = H.deg[A_idx] if A_idx else np.array([0.0])
     rel_ref = float(np.median(degA)) if len(degA) > 0 else 0.0
     rel_ref = max(rel_ref, 1.0)
 
-    # (b) minimal relevance gate
-    kept = []
-    for v in cand_list:
-        rel = H.deg[v] / rel_ref
-        if rel >= cfg.min_relevance_frac:
-            kept.append(v)
+    # (b) minimal relevance gate — allow disabling via None or <= 0
+    if cfg.min_relevance_frac is None or float(cfg.min_relevance_frac) <= 0.0:
+        kept = cand_list[:]  # no relevance gate
+    else:
+        thr_rel = float(cfg.min_relevance_frac)
+        kept = []
+        for v in cand_list:
+            rel = H.deg[v] / rel_ref
+            if rel >= thr_rel:
+                kept.append(v)
 
-    # (c) per-node external fraction cap (external neighbors among Ā / total neighbors)
-    kept2 = []
-    for v in kept:
-        dv = max(1, int(H.deg[v]))
-        ext = sum(1 for w in H.neigh[v] if not inA[w])
-        frac_ext = ext / dv
-        if frac_ext <= cfg.per_node_ext_frac_cap:
-            kept2.append(v)
+    # (c) per-node external fraction cap — allow disabling via None
+    if cfg.per_node_ext_frac_cap is None:
+        kept2 = kept[:]  # no ext-fraction cap
+    else:
+        thr_ext = float(cfg.per_node_ext_frac_cap)
+        kept2 = []
+        for v in kept:
+            dv = max(1, int(H.deg[v]))
+            ext = sum(1 for w in H.neigh[v] if not inA[w])
+            frac_ext = ext / dv
+            if frac_ext <= thr_ext:
+                kept2.append(v)
 
     # (d) global external-degree budget ordering (ascending ext, then stable hash)
     acc_info = []
@@ -574,7 +581,6 @@ def build_next_H_adaptive(
 
     accepted = [v for (v, _, _) in acc_info]
     return accepted, ext_map
-
 
 # --------------------------
 # Outer loop

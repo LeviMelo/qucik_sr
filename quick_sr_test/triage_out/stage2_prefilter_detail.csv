@@ -1,0 +1,17 @@
+pmid,year,pubtypes,ok,year_ok,pubtype_ok,design_ok
+24288340,2014,"Journal Article;Research Support, Non-U.S. Gov't;Systematic Review",False,False,False,False
+31704789,2019,Journal Article,False,False,True,False
+38345071,2024,Meta-Analysis;Systematic Review;Journal Article,False,True,False,False
+30930141,2019,Comparative Study;Journal Article;Randomized Controlled Trial,False,False,True,True
+33426660,2021,Journal Article;Review,False,True,False,False
+37079466,2023,Systematic Review;Journal Article,False,True,False,False
+26897642,2016,"Comparative Study;Journal Article;Meta-Analysis;Research Support, Non-U.S. Gov't;Systematic Review",False,False,False,True
+23923989,2013,Journal Article,False,False,True,False
+34739134,2022,Journal Article;Systematic Review,False,True,False,False
+31122843,2020,Journal Article;Randomized Controlled Trial,True,True,True,True
+36030040,2022,Journal Article;Review;Network Meta-Analysis,False,True,False,False
+38217050,2024,Journal Article;Review,False,True,False,False
+27501016,2016,Case Reports;Journal Article,False,False,False,False
+37667207,2023,Journal Article,False,True,True,False
+31168455,2019,Journal Article,False,False,True,False
+39641279,2025,Journal Article;Review,False,True,False,False
