@@ -468,6 +468,84 @@ def _download_from_pmc_with_pow(pmcid: str, session: requests.Session, out_path:
     return (False, "no_pdf_found")
 
 # --------------------------
+# Sci-Hub Fallback
+# --------------------------
+def _download_from_scihub(
+    identifier: str,
+    session: requests.Session,
+    out_path: str,
+    min_bytes: int,
+    referer: Optional[str] = None
+) -> Tuple[bool, str]:
+    """
+    Attempt to download a PDF from Sci-Hub using a DOI or PMID.
+    It tries multiple domains and parses the page to find the real PDF URL.
+    Returns (ok, final_url_or_reason).
+    """
+    if not identifier:
+        return (False, "no_identifier")
+
+    for domain in SCIHUB_DOMAINS:
+        try:
+            # Construct the Sci-Hub URL for the given identifier (DOI or PMID)
+            scihub_url = f"{domain}/{identifier}"
+            logger.info(f"Sci-Hub → Trying domain {domain} for identifier {identifier}")
+
+            # Get the Sci-Hub page that embeds the PDF
+            r = session.get(scihub_url, timeout=HTTP_TIMEOUT, headers=BROWSER_HEADERS, allow_redirects=True)
+            r.raise_for_status()
+
+            # Check if we landed on a CAPTCHA or error page
+            if "captcha" in r.text.lower() or "not found" in r.text.lower():
+                logger.warning(f"Sci-Hub ~ {identifier}: Encountered CAPTCHA or 'not found' page at {domain}.")
+                continue
+
+            # Parse the HTML to find the PDF link
+            soup = BeautifulSoup(r.text, "html.parser")
+            pdf_url = None
+
+            # Sci-Hub often embeds the PDF in an <iframe> or <embed> tag
+            iframe = soup.find("iframe", id="pdf")
+            if iframe and iframe.get("src"):
+                pdf_url = iframe["src"]
+            else:
+                embed = soup.find("embed", attrs={"type": "application/pdf"})
+                if embed and embed.get("src"):
+                    pdf_url = embed["src"]
+
+            if not pdf_url:
+                logger.warning(f"Sci-Hub ~ {identifier}: Could not find PDF embed link at {domain}.")
+                continue
+
+            # Ensure the URL is absolute
+            if pdf_url.startswith("//"):
+                pdf_url = "https:" + pdf_url
+            elif not pdf_url.startswith("http"):
+                # Sometimes the URL is relative to the Sci-Hub domain
+                pdf_url = urljoin(domain, pdf_url)
+
+            # Download the actual PDF file
+            logger.info(f"Sci-Hub ✓ {identifier}: Found PDF URL {pdf_url}. Attempting download.")
+            ok, final_url_or_reason = _download_streaming(
+                pdf_url, session, out_path, min_bytes,
+                referer=scihub_url, extra_headers=BROWSER_HEADERS
+            )
+
+            if ok:
+                return (True, final_url_or_reason)
+            else:
+                logger.warning(f"Sci-Hub ✗ {identifier}: Streaming failed from {pdf_url} with reason: {final_url_or_reason}")
+
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Sci-Hub ✗ {identifier}: Request exception for domain {domain}: {e}")
+            continue # Try next domain
+        except Exception as e:
+            logger.error(f"Sci-Hub ✗ {identifier}: An unexpected error occurred for domain {domain}: {e}", exc_info=True)
+            continue # Try next domain
+
+    return (False, "scihub_failed_all_domains")
+
+# --------------------------
 # Public API
 # --------------------------
 def attempt_oa_downloads(
@@ -567,6 +645,24 @@ def attempt_oa_downloads(
             else:
                 source = "pmc"
                 status = f"pmc_{fin}"
+
+        # -------- Sci-Hub fallback ----------
+        # Try with DOI first, as it's more reliable, then fall back to PMID
+        identifier_to_try = doi or str(pmid)
+        ok, fin = _download_from_scihub(identifier_to_try, web_session, pdf_path, min_pdf_bytes, referer=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/")
+        if ok:
+            results[str(pmid)] = {"status": "ok", "source": "scihub", "url": fin}
+            continue
+        else:
+            # If DOI failed, and we haven't already tried PMID, try it now
+            if doi and str(pmid) != identifier_to_try:
+                ok_pmid, fin_pmid = _download_from_scihub(str(pmid), web_session, pdf_path, min_pdf_bytes, referer=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/")
+                if ok_pmid:
+                    results[str(pmid)] = {"status": "ok", "source": "scihub", "url": fin_pmid}
+                    continue
+
+            source = "scihub"
+            status = f"scihub_{fin}"
 
         # -------- Give up ----------
         results[str(pmid)] = {"status": status, "source": source}
