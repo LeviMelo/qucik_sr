@@ -92,7 +92,7 @@
     "cortisol",
     "hemodynamic stability"
   ],
-  "key_pmids": [],
+  "key_pmids": [31559062, 39126533],
   "query_targets": {
     "TARGET_MIN": 40,
     "TARGET_MAX": 2000,
@@ -108,6 +108,6 @@
     "embed_endpoint": "http://localhost:1234/v1/embeddings",
     "embed_model": "text-embedding-qwen3-embedding-0.6b@f16",
     "chat_endpoint": "http://localhost:1234/v1/chat/completions",
-    "chat_model": "gemma-3n-e2b-it@q6_k"
+    "chat_model": "qwen3-4b-instruct-2507@q5_k_xl"
   }
 }

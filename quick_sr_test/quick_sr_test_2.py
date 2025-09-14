@@ -565,11 +565,10 @@ def llm_chat(
         headers["Authorization"] = f"Bearer {api_key}"
 
     def _post(payload, stream_flag):
-        # separate connect/read; short read timeout so we don't block forever
-        # keep connect at 10s; read at max(idle_timeout_s, 30) to allow slow models
+        # Short read timeout so we never block forever on SSE.
+        # Connect: 10s. Read: max(idle_timeout_s, 30s) for slow models.
         tout = (10, max(idle_timeout_s, 30)) if stream_flag else timeout_s
         return requests.post(endpoint, json=payload, headers=headers, timeout=tout, stream=stream_flag)
-
 
     def _assemble_stream(payload) -> str:
         import requests, time, json
@@ -578,7 +577,6 @@ def llm_chat(
         parts = []
         last = time.monotonic()
         try:
-            # chunk_size=1 makes lines flush quickly when server pushes small deltas
             for line in r.iter_lines(decode_unicode=True, chunk_size=1):
                 now = time.monotonic()
                 if line:
@@ -589,25 +587,24 @@ def llm_chat(
                             break
                         try:
                             j = json.loads(data)
-                            ch = j.get("choices", [{}])[0]
-                            delta = ch.get("delta", {}).get("content")
+                            ch = (j.get("choices") or [{}])[0]
+                            delta = (ch.get("delta") or {}).get("content")
                             if delta:
                                 parts.append(delta)
                             else:
-                                msg = ch.get("message", {}).get("content")
+                                msg = (ch.get("message") or {}).get("content")
                                 if msg:
                                     parts.append(msg)
-                            # stop if finish_reason is sent
+                            # also break if finish_reason explicitly says stop
                             if str(ch.get("finish_reason") or "").lower() == "stop":
                                 break
                         except Exception:
-                            # ignore malformed SSE line; keep going
                             pass
-                # (optional) idle watchdog is now just a safety net; read timeout handles hard block
+                # idle watchdog is just a backstop now
                 if idle_timeout_s and (now - last) > idle_timeout_s:
                     break
         except requests.exceptions.ReadTimeout:
-            # Treat as graceful end-of-stream: we return whatever we buffered
+            # treat as graceful end-of-stream; return what we buffered
             pass
         finally:
             try:
@@ -615,7 +612,6 @@ def llm_chat(
             except Exception:
                 pass
         return "".join(parts).strip()
-
 
     def _finish_suffix(prefix_text: str) -> str:
         # Ask model to output ONLY the remaining suffix to complete the JSON object.
@@ -747,6 +743,25 @@ def _heuristic_excl_code(reason: str) -> str:
         hits.append("DUP")
     return "|".join(hits) if hits else "OTHER"
 
+def _extract_first_json_object(txt: str):
+    import json, re
+    if not txt:
+        return None
+    s = txt.strip()
+    # strip code fences if present
+    s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.I)
+    s = re.sub(r"\s*```$", "", s)
+    # grab the first {...} block
+    m = re.search(r"\{.*\}", s, re.S)
+    if not m:
+        return None
+    cand = m.group(0)
+    # remove trailing commas like  "foo": 1,}
+    cand = re.sub(r",\s*([}\]])", r"\1", cand)
+    try:
+        return json.loads(cand)
+    except Exception:
+        return None
 
 def curate_mesh(proto: Protocol, base_pmids: List[int], universe: List[dict], stage: int=1) -> Dict[str,List[str]]:
     # collect MeSH from key_pmids (stage-1), optionally from stage-1 includes for stage-2
@@ -756,6 +771,22 @@ def curate_mesh(proto: Protocol, base_pmids: List[int], universe: List[dict], st
         if rec["pmid"] in base_set:
             mesh_terms.extend(rec.get("mesh", []) or [])
     mesh_terms = list(dict.fromkeys([m for m in mesh_terms if m]))
+    
+    # If there are no observed MeSH terms to curate, return a deterministic set
+    # straight from protocol PICO (no LLM call).
+    if not mesh_terms:
+        curated = {
+            "P": list(dict.fromkeys([t for t in proto.P_terms if t]))[:20],
+            "I": list(dict.fromkeys([t for t in proto.I_terms if t]))[:20],
+            "C": list(dict.fromkeys([t for t in proto.C_terms if t]))[:20],
+            "O": list(dict.fromkeys([t for t in proto.O_terms if t]))[:20],
+            "rejected": []
+        }
+        path = os.path.join(OUTDIR, "mesh_curated.json" if stage==1 else "mesh_curated_stage2.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(curated, f, ensure_ascii=False, indent=2)
+        return curated
+
 
     sys_prompt = (
         "ROLE: You curate MeSH-like terms into P/I/C/O bins for a systematic review.\n"
@@ -794,11 +825,7 @@ def curate_mesh(proto: Protocol, base_pmids: List[int], universe: List[dict], st
 
     # robust parse + sanitize
     curated = {"P": [], "I": [], "C": [], "O": [], "rejected": []}
-    try:
-        parsed = json.loads(txt)
-    except Exception:
-        m = re.search(r"\{.*\}", txt, re.S)
-        parsed = json.loads(m.group(0)) if m else curated
+    parsed = _extract_first_json_object(txt) or {"P":[],"I":[],"C":[],"O":[],"rejected":[]}
 
     for k in ["P","I","C","O","rejected"]:
         vals = parsed.get(k, [])
@@ -1064,11 +1091,9 @@ def screen_tiab(proto: Protocol, curated: Dict[str,List[str]], records_csv: str,
 
             user_prompt = mk_user_payload(row.to_dict())
             txt = llm_chat(proto.llm["chat_endpoint"], proto.llm["chat_model"], sys_prompt, user_prompt)
-            try:
-                obj = json.loads(txt)
-            except Exception:
-                m = re.search(r"\{.*\}", txt, re.S)
-                obj = json.loads(m.group(0)) if m else {"label":"exclude","conf":0.0,"reason":"parse_error"}
+            obj = _extract_first_json_object(txt)
+            if obj is None:
+                obj = {"label":"exclude","conf":0.0,"reason":"parse_error","pris_ref":pris_ref,"excl_code":"OTHER"}
 
             # enforce schema & backfill excl_code if missing
             if "excl_code" not in obj or not obj["excl_code"]:
@@ -1250,11 +1275,7 @@ def _fulltext_chunk_vote(proto: Protocol, record_meta: dict, chunk_text: str, sy
         sys_prompt, json.dumps(user_payload, ensure_ascii=False),
         timeout_s=60, max_retries=4, log_path=os.path.join(OUTDIR, "fulltext.log")
     )
-    try:
-        obj = json.loads(txt)
-    except Exception:
-        m = re.search(r"\{.*\}", txt, re.S)
-        obj = json.loads(m.group(0)) if m else {"label":"exclude","conf":0.0,"reason":"parse_error","excl_code":"OTHER"}
+    obj = _extract_first_json_object(txt) or {"label":"exclude","conf":0.0,"reason":"parse_error","excl_code":"OTHER"}
     if "excl_code" not in obj or not obj["excl_code"]:
         obj["excl_code"] = _heuristic_excl_code(obj.get("reason",""))
     return _ensure_schema(obj, pris_ref="fulltext", allow_maybe=False)
@@ -1833,12 +1854,24 @@ def run_pipeline(protocol_path: str):
         root_log.info("[MeSH] Stage-2 iterative curation from stage-1 includes…")
         import pandas as _pd
         s1inc_csv = os.path.join(OUTDIR, "stage1_included.csv")
-        if os.path.exists(s1inc_csv):
-            _s1 = _pd.read_csv(s1inc_csv)
-            _s1_pmids = [int(x) for x in _s1["pmid"].tolist() if str(x).isdigit()]
-        else:
-            _s1_pmids = seeds  # fallback to earlier seed set
+        _s1_pmids = []
+
+        try:
+            if os.path.exists(s1inc_csv) and os.path.getsize(s1inc_csv) > 0:
+                _s1 = _pd.read_csv(s1inc_csv)
+                if "pmid" in _s1.columns:
+                    _s1_pmids = [int(x) for x in _s1["pmid"].astype(str) if x.isdigit()]
+                elif len(_s1.columns) > 0:
+                    # very defensive: take first column if header changed
+                    _s1_pmids = [int(x) for x in _s1.iloc[:,0].astype(str) if x.isdigit()]
+        except Exception as e:
+            root_log.warning(f"[Stage2] Could not read {s1inc_csv}: {e!s} — proceeding without S1 includes.")
+
+        if not _s1_pmids:
+            root_log.info("[Stage2] No stage-1 includes — using protocol base P/I/C/O for stage-2 curation.")
+
         curated2 = curate_mesh(proto, _s1_pmids, kept + stage2_recs, stage=2)
+
         root_log.info("[Rank] Stage-2 ranking…")
         rank_stage(proto, stage2_recs, curated2, out_csv="triage_stage2_candidates.csv")
         root_log.info("[Screen] Stage-2 TIAB LLM…")

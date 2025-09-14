@@ -1,0 +1,42 @@
+# 2025-09-14T21:17:21.868361+00:00Z triage_stage1_candidates.csv -> s1_llm_screen.jsonl
+screen	pmid=36163699	label=include	conf=0.95	reason=Matches pediatric population, NIVATS vs IVATS, key outcomes,
+screen	pmid=40381798	label=exclude	conf=0.98	reason=Study compares LMA vs ETT in laparoscopic hernia repair, not
+screen	pmid=38039017	label=include	conf=0.98	reason=Meets all PICO criteria and study design; pediatric VATS, NI
+screen	pmid=39126533	label=include	conf=0.98	reason=Matches PICO and design; pediatric VATS, NIVATS vs IVATS, PP
+screen	pmid=38475699	label=include	conf=0.98	reason=Matches pediatric VATS, NIVATS vs IVATS, perioperative outco
+screen	pmid=29165767	label=exclude	conf=0.99	reason=Study on neurosurgery, not thoracic surgery or VATS; no NIVA
+screen	pmid=35472588	label=exclude	conf=0.98	reason=Population is adults, not pediatric (0â18 years)
+screen	pmid=36755214	label=exclude	conf=0.99	reason=Study compares intubated anesthesia, not NIVATS vs IVATS; vi
+screen	pmid=40890592	label=exclude	conf=0.95	reason=Study compares LMA to intubation in pectus excavatum, not VA
+screen	pmid=26408621	label=exclude	conf=0.99	reason=Population is children undergoing hypospadias surgery, not V
+screen	pmid=40315786	label=exclude	conf=0.98	reason=Pubtype is Comparative Study (blocked), and lacks NIVATS vs
+screen	pmid=32507285	label=exclude	conf=0.99	reason=Study compares supraglottic airway devices, not NIVATS vs IV
+screen	pmid=36782358	label=exclude	conf=0.98	reason=Intervention is local anesthesia, not non-intubated NIVATS;
+screen	pmid=35338764	label=exclude	conf=0.99	reason=Study involves laparoscopic surgery, not VATS; no comparison
+screen	pmid=34289809	label=exclude	conf=0.98	reason=Population is preterm neonates, not pediatric 0-18 years; in
+screen	pmid=28108038	label=exclude	conf=0.98	reason=Study compares LMAs vs endotracheal tubes, not NIVATS vs IVA
+screen	pmid=28858134	label=exclude	conf=0.98	reason=Study compares inhalational agents, not NIVATS vs IVATS; lac
+screen	pmid=27409643	label=exclude	conf=0.99	reason=Study compares PLMA with ETTs, not NIVATS vs IVATS; no menti
+screen	pmid=36178200	label=include	conf=0.95	reason=Matches pediatric VATS, compares NIVATS vs IVATS, reports re
+screen	pmid=28870163	label=exclude	conf=0.99	reason=Study compares LMAs, not NIVATS vs IVATS; no mention of anes
+screen	pmid=38741443	label=exclude	conf=0.99	reason=Study compares LMA devices for intubation, not NIVATS vs IVA
+screen	pmid=33407130	label=exclude	conf=0.99	reason=Population is adults, not pediatric; intervention and compar
+screen	pmid=27548910	label=exclude	conf=0.99	reason=Study population is laparoscopic inguinal hernia, not pediat
+screen	pmid=40629036	label=exclude	conf=0.99	reason=Population is adult, not pediatric (0â18 years); intervent
+screen	pmid=37043197	label=exclude	conf=0.99	reason=Study compares aerosol box use in airway procedures, not NIV
+screen	pmid=33419400	label=exclude	conf=0.99	reason=Study compares LMA removal timing with lidocaine, not NIVATS
+screen	pmid=31149001	label=exclude	conf=0.99	reason=Population is adult, not pediatric; intervention and compara
+screen	pmid=29258438	label=exclude	conf=0.99	reason=Population is pregnant women, not pediatric patients; interv
+screen	pmid=32847548	label=exclude	conf=0.99	reason=Population is obstetric, not pediatric; intervention and com
+screen	pmid=28130967	label=exclude	conf=0.99	reason=Study population is preterm neonates, not pediatric patients
+screen	pmid=38836694	label=exclude	conf=0.99	reason=Study focuses on aerosol box and HCP workload, not NIVATS vs
+screen	pmid=37384794	label=exclude	conf=0.99	reason=Study population is adults, not pediatric; no mention of VAT
+screen	pmid=27555183	label=exclude	conf=0.99	reason=Study population not pediatric (adults only), incorrect inte
+# 2025-09-14T21:21:04.706420+00:00Z triage_stage2_candidates.csv -> s2_llm_screen.jsonl
+screen	pmid=33785209	label=include	conf=0.98	reason=Matches pediatric VATS, NIVATS vs IVATS, and outcomes; meets
+screen	pmid=28249684	label=exclude	conf=0.99	reason=Study on laparoscopic hernia repair, not VATS or thoracic su
+screen	pmid=33168406	label=exclude	conf=0.98	reason=Study involves laparoscopic hernia repair, not VATS or thora
+screen	pmid=39189565	label=exclude	conf=0.99	reason=Population is elderly (>65 years), not pediatric (0â18 yea
+screen	pmid=39266989	label=exclude	conf=0.99	reason=Study compares opioid-reduced anesthesia with standard gener
+screen	pmid=31510831	label=exclude	conf=0.98	reason=Intervention is combined epidural and general anesthesia, no
+screen	pmid=26003882	label=exclude	conf=0.99	reason=Population is neonates, not pediatric 0â18 years; interven

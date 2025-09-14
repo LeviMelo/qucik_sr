@@ -1,0 +1,52 @@
+pmid,year,pubtypes,ok,year_ok,pubtype_ok,design_ok
+31510831,2019,Journal Article;Randomized Controlled Trial,True,True,True,True
+8424538,1993,Letter,False,False,False,False
+33168406,2021,Journal Article;Randomized Controlled Trial,True,True,True,True
+38915035,2024,Journal Article;Meta-Analysis;Systematic Review,False,True,False,False
+23130725,2012,Biography;Historical Article;Journal Article;Portrait,False,False,True,False
+22070630,2012,Comparative Study;Journal Article;Randomized Controlled Trial,False,False,True,True
+12066737,2002,Journal Article,False,False,True,False
+37222766,2023,English Abstract;Journal Article;Review,False,True,False,False
+3688395,1987,Journal Article,False,False,True,False
+10365012,1999,Clinical Trial;Comparative Study;Journal Article;Randomized Controlled Trial,False,False,True,True
+22178627,2012,Historical Article;Journal Article;Review,False,False,False,False
+19444123,2010,Journal Article;Randomized Controlled Trial,False,False,True,True
+38171956,2024,Meta-Analysis;Systematic Review;Journal Article,False,True,False,False
+20958278,2010,Comparative Study;Journal Article;Randomized Controlled Trial,False,False,True,True
+10475299,1999,"Journal Article;Research Support, Non-U.S. Gov't",False,False,True,False
+9296432,1997,Clinical Trial;Comparative Study;Journal Article;Randomized Controlled Trial,False,False,True,True
+33785209,2022,Journal Article;Randomized Controlled Trial,True,True,True,True
+11359590,2001,Clinical Trial;Comparative Study;Journal Article;Randomized Controlled Trial,False,False,True,True
+28249684,2017,Comparative Study;Journal Article;Randomized Controlled Trial,True,True,True,True
+6349667,1983,Journal Article,False,False,True,False
+26003882,2015,"Journal Article;Randomized Controlled Trial;Research Support, Non-U.S. Gov't",True,True,True,True
+10861142,2000,"Clinical Trial;Journal Article;Randomized Controlled Trial;Research Support, Non-U.S. Gov't",False,False,True,True
+40023044,2025,Comparative Study;Journal Article;Systematic Review,False,True,False,True
+39266989,2024,"Journal Article;Randomized Controlled Trial;Research Support, Non-U.S. Gov't",True,True,True,True
+37941592,2023,Journal Article,False,True,True,False
+37455532,2023,Journal Article,False,True,True,False
+35626910,2022,Journal Article;Review,False,True,False,False
+18559351,2008,Journal Article;Randomized Controlled Trial,False,False,True,True
+27158989,2016,Journal Article;Systematic Review,False,True,False,False
+20661199,2010,Comparative Study;Journal Article;Randomized Controlled Trial,False,False,True,True
+17359400,2007,Comparative Study;Journal Article;Randomized Controlled Trial,False,False,True,True
+37869156,2023,Journal Article,False,True,True,False
+31559062,2019,Journal Article,False,True,True,False
+40442616,2025,Journal Article;Systematic Review;Meta-Analysis;Comparative Study,False,True,False,True
+30532585,2018,Journal Article;Review,False,True,False,False
+39391361,2024,Journal Article;Review,False,True,False,False
+9691877,1998,Clinical Trial;Journal Article;Randomized Controlled Trial,False,False,True,True
+31427968,2019,Journal Article,False,True,True,False
+31057236,2019,Journal Article,False,True,True,False
+18455403,2008,Comparative Study;Journal Article;Randomized Controlled Trial,False,False,True,True
+33935544,2021,Journal Article,False,True,True,False
+39189565,2024,Journal Article;Randomized Controlled Trial,True,True,True,True
+23162394,2012,Journal Article,False,False,True,False
+14996260,2004,"Journal Article;Research Support, Non-U.S. Gov't",False,False,True,False
+24778598,2014,"Journal Article;Randomized Controlled Trial;Research Support, Non-U.S. Gov't",False,False,True,True
+25074619,2014,Journal Article;Meta-Analysis;Review,False,False,False,False
+30878762,2019,Comparative Study;Journal Article;Meta-Analysis;Systematic Review,False,True,False,True
+37386873,2023,Systematic Review;Journal Article;Meta-Analysis;Comparative Study,False,True,False,True
+30069317,2018,Journal Article,False,True,True,False
+38909156,2025,Journal Article,False,True,True,False
+30247331,2020,Journal Article,False,True,True,False

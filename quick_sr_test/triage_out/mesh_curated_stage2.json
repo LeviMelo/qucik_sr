@@ -1,0 +1,72 @@
+{
+  "P": [
+    "pediatric",
+    "child",
+    "children",
+    "infant",
+    "adolescent",
+    "0-18 years"
+  ],
+  "I": [
+    "non-intubated anesthesia",
+    "NIVATS",
+    "spontaneous ventilation anesthesia",
+    "laryngeal mask airway",
+    "LMA",
+    "sedation anesthesia",
+    "regional anesthesia plus sedation"
+  ],
+  "C": [
+    "intubated VATS",
+    "IVATS",
+    "general anesthesia with intubation",
+    "one-lung ventilation",
+    "OLV",
+    "double-lumen tube",
+    "single-lumen endotracheal tube",
+    "endotracheal intubation",
+    "mechanical ventilation"
+  ],
+  "O": [
+    "postoperative complications",
+    "airway complications",
+    "hypoxemia",
+    "oxygen desaturation",
+    "SpO2",
+    "minimum oxygen saturation",
+    "conversion to intubation",
+    "conversion rate",
+    "postoperative nausea and vomiting",
+    "PONV",
+    "sore throat",
+    "pain score",
+    "opioid consumption",
+    "PACU time",
+    "ICU admission",
+    "anesthesia duration",
+    "operative time"
+  ],
+  "rejected": [
+    "Humans",
+    "Double-Blind Method",
+    "Female",
+    "Male",
+    "Thoracic Surgery, Video-Assisted",
+    "Incidence",
+    "Aged",
+    "Adult",
+    "Anesthesia, Conduction",
+    "Nerve Block",
+    "Respiration, Artificial",
+    "Workload",
+    "Pilot Projects",
+    "Anesthesia, General",
+    "Lung Diseases",
+    "Patient Reported Outcome Measures",
+    "Drainage",
+    "Pneumothorax",
+    "Retrospective Studies",
+    "Treatment Outcome",
+    "Young Adult"
+  ]
+}

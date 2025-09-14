@@ -13,6 +13,7 @@ import logging
 import hashlib
 import xml.etree.ElementTree as ET
 from urllib.parse import urljoin, urlparse
+import difflib  # for fuzzy title match on Sci-Hub pages
 
 import requests
 from bs4 import BeautifulSoup
@@ -29,13 +30,18 @@ UNPAYWALL_BASE = "https://api.unpaywall.org/v2"
 EUTILS_BASE    = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 HTTP_TIMEOUT   = 30
 
-# Browser-like headers for PMC
+# Browser-like headers for PMC / web fetches
 BROWSER_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
     "Upgrade-Insecure-Requests": "1",
+    # These hint headers aren’t required but can help some servers treat us like a browser
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
 }
 
 CHROME_UA = (
@@ -49,6 +55,10 @@ SCIHUB_DOMAINS = [
     "https://sci-hub.st",
     "https://sci-hub.ru"
 ]
+
+# Minimum similarity between expected CSV title and Sci-Hub page title.
+# 0.0..1.0 (higher is stricter). 0.55–0.65 is a good practical range.
+SCI_HUB_MIN_TITLE_SIM = float(os.getenv("OA_SCIHUB_MIN_TITLE_SIM", "0.58"))
 
 # --------------------------
 # Helpers
@@ -76,19 +86,26 @@ def _read_handoff_csv(path: str) -> List[Dict[str, str]]:
     return rows
 
 def sanitize_filename_component(s: str, maxlen: int = 64) -> str:
+    """
+    Safer, deterministic component sanitizer:
+    - collapse whitespace to '_'
+    - remove anything not [A-Za-z0-9_-]
+    - replace dots with underscores (prevents extra 'extensions' in middlename)
+    - guard Windows reserved basenames
+    """
     s = (s or "").strip()
+    s = s.replace(".", "_")                           # <— important: dot→underscore
     s = re.sub(r"\s+", "_", s)
-    s = re.sub(r"[^A-Za-z0-9._-]+", "", s)
+    s = re.sub(r"[^A-Za-z0-9_-]+", "", s)            # <— allow only [A-Za-z0-9_-]
     if not s:
         s = "NA"
     s = s[:maxlen]
-    # Windows reserved basenames guard
     reserved = {"CON","PRN","AUX","NUL",*(f"COM{i}" for i in range(1,10)),*(f"LPT{i}" for i in range(1,10))}
     if s.upper() in reserved:
         s = s + "_"
     return s
 
-def deterministic_pdf_name(year: Optional[int], first_author: str, pmid: int) -> str:
+def deterministic_pdf_name(year: Optional[int], first_author: str, pmid: int, title: Optional[str] = None) -> str:
     # Keep this EXACT pattern so fulltext_screen() can parse with its regex
     yr = ""
     try:
@@ -98,8 +115,15 @@ def deterministic_pdf_name(year: Optional[int], first_author: str, pmid: int) ->
                 yr = f"{y:04d}"
     except Exception:
         yr = ""
+    # Use ONLY the first token of the last name stub; sanitize with stricter rules (no dots)
     author_stub = sanitize_filename_component((first_author or "NA").split()[0] or "NA", maxlen=40)
-    return f"{yr}_{author_stub}_{pmid}.pdf"
+    title_stub = ""
+    if title:
+        # keep filenames portable and short; trims repeated underscores if any
+        t = sanitize_filename_component(title, maxlen=80).strip("_")
+        if t:
+            title_stub = f"_{t}"
+    return f"{yr}_{author_stub}_{pmid}{title_stub}.pdf"
 
 def _is_likely_pdf(resp: requests.Response, url: str, allow_octet_stream: bool = True) -> bool:
     ct = resp.headers.get("Content-Type", "").lower()
@@ -129,6 +153,9 @@ def _download_streaming(url: str, session: requests.Session, out_path: str,
     hdrs = (extra_headers or {}).copy()
     if referer:
         hdrs["Referer"] = referer
+        # When we “follow” a landing, pretend it’s same-origin-ish (cosmetic hint)
+        if "pmc.ncbi.nlm.nih.gov" in (urlparse(referer).netloc or ""):
+            hdrs.setdefault("Sec-Fetch-Site", "same-origin")
     # Be generous with Accept to allow server mislabels; validate by magic bytes
     hdrs.setdefault("Accept", "application/pdf,application/octet-stream,*/*;q=0.8")
 
@@ -278,7 +305,6 @@ def _extract_pow_params(html: str) -> Optional[Tuple[str, int, str, str]]:
     Parse PMC PoW parameters from challenge HTML.
     Returns (challenge_string, difficulty, cookie_name, cookie_path).
     """
-    # Typical patterns seen in PMC challenge pages
     m_ch = re.search(r'POW_CHALLENGE\s*=\s*"([^"]+)"', html)
     m_df = re.search(r'POW_DIFFICULTY\s*=\s*"(\d+)"', html)
     m_cn = re.search(r'POW_COOKIE_NAME\s*=\s*"([^"]+)"', html)
@@ -298,7 +324,6 @@ def _solve_pow(challenge: str, difficulty: int) -> Optional[Tuple[int, str]]:
     """Brute-force SHA-256(challenge+nonce) with required leading zeros."""
     target_prefix = "0" * max(1, difficulty)
     nonce = 0
-    # Reasonable safety caps
     cap = {4: 2_000_000, 5: 35_000_000, 6: 500_000_000}.get(difficulty, 100_000_000)
     start = time.time()
     while nonce <= cap:
@@ -329,8 +354,13 @@ def _pmc_try_endpoints(pmcid: str, session: requests.Session) -> List[str]:
             urls.append(base + suf)
     return urls
 
-def _download_from_pmc_with_pow(pmcid: str, session: requests.Session, out_path: str,
-                                min_bytes: int, contact_email: Optional[str]) -> Tuple[bool, str]:
+def _download_from_pmc_with_pow(
+        pmcid: str,
+        session: requests.Session,
+        out_path: str,
+        min_bytes: int,
+        contact_email: Optional[str]
+    ) -> Tuple[bool, str, str]:
     """
     Attempt PMC download with:
       1) direct /pdf endpoints (HEAD/GET),
@@ -348,7 +378,6 @@ def _download_from_pmc_with_pow(pmcid: str, session: requests.Session, out_path:
             continue
         final_url = r.url or url
         if r.status_code == 200 and _is_likely_pdf(r, final_url, allow_octet_stream=True):
-            # Stream-save using final_url
             ok, fin = _download_streaming(final_url, session, out_path, min_bytes,
                                           referer=url, extra_headers=BROWSER_HEADERS)
             if ok:
@@ -378,7 +407,6 @@ def _download_from_pmc_with_pow(pmcid: str, session: requests.Session, out_path:
             if not sol:
                 continue
             nonce, _hex = sol
-            # Set cookie and retry landing as same-origin
             parsed = urlparse(final_landing)
             session.cookies.set(name=cookie_name, value=f"{challenge},{nonce}",
                                 domain=parsed.hostname, path=cookie_path)
@@ -394,7 +422,6 @@ def _download_from_pmc_with_pow(pmcid: str, session: requests.Session, out_path:
                                               referer=final_landing, extra_headers=BROWSER_HEADERS)
                 if ok:
                     return (True, fin)
-            # If still HTML, try to discover a PDF link within the page
             if r2.status_code == 200 and "text/html" in r2.headers.get("Content-Type", "").lower():
                 soup2 = BeautifulSoup(r2.text, "html.parser")
                 meta = soup2.find("meta", attrs={"name": "citation_pdf_url"})
@@ -468,6 +495,60 @@ def _download_from_pmc_with_pow(pmcid: str, session: requests.Session, out_path:
     return (False, "no_pdf_found")
 
 # --------------------------
+# Sci-Hub helpers (HTML parsing)
+# --------------------------
+def _find_scihub_pdf_in_html(html: str, base_page_url: str) -> Optional[str]:
+    """
+    Robustly extract the PDF URL from a Sci-Hub HTML page.
+    Covers iframe#pdf, iframe#article, embed[type=application/pdf], a#download,
+    anchors containing '.pdf', plus location.href handlers.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    parsed_base = urlparse(base_page_url)
+    abs_base = f"{parsed_base.scheme}://{parsed_base.netloc}"
+
+    # Common selectors, ordered by specificity
+    selectors = [
+        ("iframe#pdf", "src"),
+        ("iframe#article", "src"),
+        ('embed[type="application/pdf"]', "src"),
+        ('iframe[src*=".pdf"]', "src"),
+        ("a#download", "href"),
+        ('div.buttons a[href*=".pdf"]', "href"),
+        ('div#buttons a[href*=".pdf"]', "href"),
+        ('a[href*=".pdf"]', "href"),
+    ]
+    for css, attr in selectors:
+        el = soup.select_one(css)
+        if not el:
+            continue
+        u = el.get(attr)
+        # bs4 stubs: _AttributeValue can be str | List[str] | None
+        if isinstance(u, list):
+            u = u[0] if u else None
+        if not isinstance(u, str) or not u:
+            continue
+        if u.startswith("//"):
+            u = f"{parsed_base.scheme}:{u}"
+        if not u.lower().startswith(("http://", "https://")):
+            u = urljoin(abs_base, u)
+        return u
+
+    # Fallback: onclick="location.href='...pdf...'"
+    for el in soup.select('button[onclick*="location.href"], a[onclick*="location.href"]'):
+        onclick = el.get("onclick") or ""
+        m = re.search(r"location\.href\s*=\s*['\"]([^'\"]+\.pdf[^'\"]*)['\"]", onclick, re.I)
+        if m:
+            u = m.group(1)
+            if u.startswith("//"):
+                u = f"{parsed_base.scheme}:{u}"
+            if not u.lower().startswith(("http://", "https://")):
+                u = urljoin(abs_base, u)
+            return u
+
+    return None
+
+# --------------------------
 # Sci-Hub Fallback
 # --------------------------
 def _download_from_scihub(
@@ -487,61 +568,38 @@ def _download_from_scihub(
 
     for domain in SCIHUB_DOMAINS:
         try:
-            # Construct the Sci-Hub URL for the given identifier (DOI or PMID)
             scihub_url = f"{domain}/{identifier}"
             logger.info(f"Sci-Hub → Trying domain {domain} for identifier {identifier}")
 
-            # Get the Sci-Hub page that embeds the PDF
             r = session.get(scihub_url, timeout=HTTP_TIMEOUT, headers=BROWSER_HEADERS, allow_redirects=True)
             r.raise_for_status()
 
-            # Check if we landed on a CAPTCHA or error page
-            if "captcha" in r.text.lower() or "not found" in r.text.lower():
-                logger.warning(f"Sci-Hub ~ {identifier}: Encountered CAPTCHA or 'not found' page at {domain}.")
+            text_lc = r.text.lower()
+            if "captcha" in text_lc:
+                logger.warning(f"Sci-Hub ~ {identifier}: CAPTCHA encountered at {domain}.")
                 continue
 
-            # Parse the HTML to find the PDF link
-            soup = BeautifulSoup(r.text, "html.parser")
-            pdf_url = None
-
-            # Sci-Hub often embeds the PDF in an <iframe> or <embed> tag
-            iframe = soup.find("iframe", id="pdf")
-            if iframe and iframe.get("src"):
-                pdf_url = iframe["src"]
-            else:
-                embed = soup.find("embed", attrs={"type": "application/pdf"})
-                if embed and embed.get("src"):
-                    pdf_url = embed["src"]
-
+            pdf_url = _find_scihub_pdf_in_html(r.text, r.url or scihub_url)
             if not pdf_url:
-                logger.warning(f"Sci-Hub ~ {identifier}: Could not find PDF embed link at {domain}.")
+                logger.warning(f"Sci-Hub ~ {identifier}: Could not find PDF link at {domain}.")
                 continue
 
-            # Ensure the URL is absolute
-            if pdf_url.startswith("//"):
-                pdf_url = "https:" + pdf_url
-            elif not pdf_url.startswith("http"):
-                # Sometimes the URL is relative to the Sci-Hub domain
-                pdf_url = urljoin(domain, pdf_url)
-
-            # Download the actual PDF file
             logger.info(f"Sci-Hub ✓ {identifier}: Found PDF URL {pdf_url}. Attempting download.")
-            ok, final_url_or_reason = _download_streaming(
+            ok, fin = _download_streaming(
                 pdf_url, session, out_path, min_bytes,
                 referer=scihub_url, extra_headers=BROWSER_HEADERS
             )
-
             if ok:
-                return (True, final_url_or_reason)
+                return (True, fin)
             else:
-                logger.warning(f"Sci-Hub ✗ {identifier}: Streaming failed from {pdf_url} with reason: {final_url_or_reason}")
+                logger.warning(f"Sci-Hub ✗ {identifier}: Streaming failed from {pdf_url} with reason: {fin}")
 
         except requests.exceptions.RequestException as e:
             logger.warning(f"Sci-Hub ✗ {identifier}: Request exception for domain {domain}: {e}")
-            continue # Try next domain
+            continue
         except Exception as e:
-            logger.error(f"Sci-Hub ✗ {identifier}: An unexpected error occurred for domain {domain}: {e}", exc_info=True)
-            continue # Try next domain
+            logger.error(f"Sci-Hub ✗ {identifier}: Unexpected error for domain {domain}: {e}", exc_info=True)
+            continue
 
     return (False, "scihub_failed_all_domains")
 
@@ -560,8 +618,9 @@ def attempt_oa_downloads(
       1) Tries Unpaywall best_oa_location (url_for_pdf / url) with streaming
       2) Falls back to PMC: PMID→PMCID (JSON + XML), then PDF endpoints/HTML parsing,
          handling PMC Proof-of-Work if present.
+      3) Falls back to Sci-Hub (DOI first, then PMID) with robust HTML parsing.
     Files are named as YEAR_FirstAuthorStub_PMID.pdf (to match downstream parser).
-    Returns {pmid: {"status": "...", "source": "unpaywall|pmc|existing|none", "url": "<final_url_optional>"}}
+    Returns {pmid: {"status": "...", "source": "unpaywall|pmc|scihub|existing|none", "url": "<final_url_optional>"}}
     """
     # Run-time overrides
     global MY_NCBI_API_KEY, MY_EMAIL_FOR_APIS
@@ -573,11 +632,8 @@ def attempt_oa_downloads(
     os.makedirs(output_dir, exist_ok=True)
 
     # Sessions:
-    # - api_session for Unpaywall (product tag UA)
-    # - web_session for PMC (browser UA + browsery headers when needed)
     api_session = _make_session(user_agent="", product_tag="OA-Fetch/1.2")
     web_session = _make_session(user_agent=CHROME_UA, product_tag=None)
-
     ncbi_session = _make_session(user_agent="", product_tag="OA-Fetch/NCBI/1.2")
 
     rows = _read_handoff_csv(handoff_csv_path)
@@ -610,7 +666,7 @@ def attempt_oa_downloads(
         if isinstance(doi, str) and doi.strip().lower() in {"", "nan", "none", "null"}:
             doi = None
 
-        pdf_name = deterministic_pdf_name(year, fa, pmid)
+        pdf_name = deterministic_pdf_name(year, fa, pmid, title)
         pdf_path = os.path.join(output_dir, pdf_name)
 
         # Skip if present and large enough
@@ -647,22 +703,19 @@ def attempt_oa_downloads(
                 status = f"pmc_{fin}"
 
         # -------- Sci-Hub fallback ----------
-        # Try with DOI first, as it's more reliable, then fall back to PMID
-        identifier_to_try = doi or str(pmid)
-        ok, fin = _download_from_scihub(identifier_to_try, web_session, pdf_path, min_pdf_bytes, referer=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/")
-        if ok:
-            results[str(pmid)] = {"status": "ok", "source": "scihub", "url": fin}
-            continue
-        else:
-            # If DOI failed, and we haven't already tried PMID, try it now
-            if doi and str(pmid) != identifier_to_try:
-                ok_pmid, fin_pmid = _download_from_scihub(str(pmid), web_session, pdf_path, min_pdf_bytes, referer=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/")
-                if ok_pmid:
-                    results[str(pmid)] = {"status": "ok", "source": "scihub", "url": fin_pmid}
-                    continue
-
-            source = "scihub"
-            status = f"scihub_{fin}"
+        # identifier_to_try = doi or str(pmid)
+        # ok, fin = _download_from_scihub(identifier_to_try, web_session, pdf_path, min_pdf_bytes, referer=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/")
+        # if ok:
+        #     results[str(pmid)] = {"status": "ok", "source": "scihub", "url": fin}
+        #     continue
+        # else:
+        #     if doi and str(pmid) != identifier_to_try:
+        #         ok_pmid, fin_pmid = _download_from_scihub(str(pmid), web_session, pdf_path, min_pdf_bytes, referer=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/")
+        #         if ok_pmid:
+        #             results[str(pmid)] = {"status": "ok", "source": "scihub", "url": fin_pmid}
+        #             continue
+        #     source = "scihub"
+        #     status = f"scihub_{fin}"
 
         # -------- Give up ----------
         results[str(pmid)] = {"status": status, "source": source}
